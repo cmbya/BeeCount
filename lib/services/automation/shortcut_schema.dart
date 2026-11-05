@@ -67,7 +67,7 @@ int parseShortcutAmount(String text, {int digits = 2}) {
 
 class ShortcutEntry {
   final int amountMinor;
-  final int categoryId;
+  final int? categoryId;
   final String note;
   final List<int> tagIds;
   final bool excludeFromBudget;
@@ -78,7 +78,8 @@ class ShortcutEntry {
       required this.tagIds,
       required this.excludeFromBudget});
 
-  factory ShortcutEntry.fromJson(Map<String, dynamic> json) {
+  factory ShortcutEntry.fromJson(Map<String, dynamic> json,
+      {String type = 'expense'}) {
     final tags = json['tagIds'];
     if (tags is! List ||
         tags.length > 100 ||
@@ -90,7 +91,8 @@ class ShortcutEntry {
     }
     return ShortcutEntry(
         amountMinor: shortcutInt(json['amountMinor'], '金额'),
-        categoryId: shortcutInt(json['categoryId'], '分类'),
+        categoryId:
+            type == 'transfer' ? null : shortcutInt(json['categoryId'], '分类'),
         note: json['note'] as String,
         tagIds: tags.cast<int>().toSet().toList()..sort(),
         excludeFromBudget: json['excludeFromBudget'] as bool);
@@ -105,6 +107,8 @@ class ShortcutEntry {
 }
 
 class ShortcutSubmission {
+  final String type;
+  final int? toAccountId;
   final String currency;
   final String requestId;
   final int ledgerId;
@@ -114,6 +118,8 @@ class ShortcutSubmission {
   final List<ShortcutEntry> entries;
   const ShortcutSubmission(
       {required this.requestId,
+      this.type = 'expense',
+      this.toAccountId,
       required this.currency,
       required this.ledgerId,
       required this.accountId,
@@ -128,7 +134,7 @@ class ShortcutSubmission {
     if (json['schemaVersion'] != 1 ||
         json['currency'] is! String ||
         !RegExp(r'^[A-Z]{3}$').hasMatch(json['currency'] as String) ||
-        json['type'] != 'expense' ||
+        !['expense', 'income', 'transfer'].contains(json['type']) ||
         json['confirmed'] != true ||
         id is! String ||
         !RegExp(r'^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')
@@ -147,13 +153,27 @@ class ShortcutSubmission {
     final entries = raw.map((v) {
       if (v is! Map<String, dynamic>)
         throw const ShortcutFailure('INVALID_REQUEST', '明细无效');
-      return ShortcutEntry.fromJson(v);
+      return ShortcutEntry.fromJson(v, type: json['type'] as String);
     }).toList();
+    if (json['type'] != 'expense' &&
+        (entries.length != 1 || entries.any((e) => e.excludeFromBudget))) {
+      throw const ShortcutFailure('INVALID_REQUEST', '收入及转账只允许单笔，不使用预算排除标记');
+    }
+    final destination = json['type'] == 'transfer'
+        ? shortcutInt(json['toAccountId'], '转入账户')
+        : null;
+    if (json['type'] != 'transfer' && json['toAccountId'] != null ||
+        destination != null && destination == json['accountId']) {
+      throw const ShortcutFailure(
+          'INVALID_REFERENCE', '转出和转入账户必须不同，非转账不能指定转入账户');
+    }
     final original = shortcutInt(json['originalAmountMinor'], '原付款');
     if (entries.fold<int>(0, (s, e) => s + e.amountMinor) != original) {
       throw const ShortcutFailure('INVALID_AMOUNT', '明细合计必须等于原付款');
     }
     return ShortcutSubmission(
+        type: json['type'] as String,
+        toAccountId: destination,
         currency: json['currency'] as String,
         requestId: id.toLowerCase(),
         ledgerId: shortcutInt(json['ledgerId'], '账本'),
@@ -170,7 +190,8 @@ class ShortcutSubmission {
         'requestId': requestId,
         'ledgerId': ledgerId,
         'accountId': accountId,
-        'type': 'expense',
+        'type': type,
+        if (toAccountId != null) 'toAccountId': toAccountId,
         'occurredAt': occurredAt.toIso8601String(),
         'originalAmountMinor': originalAmountMinor,
         'entries': entries.map((e) => e.toJson()).toList()

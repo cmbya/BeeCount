@@ -12,7 +12,7 @@ permissions:
 jobs:
   verify:
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
@@ -53,5 +53,18 @@ jobs:
         with:
           name: BeeCount-shortcut-unsigned
           path: build/shortcut-package/BeeCount-shortcut-unsigned.ipa
+          retention-days: 14
+      - name: Verify native bridge, image preparation and editor helpers
+        run: |
+          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; devices=json.load(sys.stdin)["devices"]; print(next(d["udid"] for group in devices.values() for d in group if d["name"].startswith("iPhone")))')
+          xcodebuild test -workspace ios/Runner.xcworkspace -scheme Runner -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE_ID" -only-testing:RunnerTests -resultBundlePath build/shortcut-native-tests.xcresult CODE_SIGNING_ALLOWED=NO > build/shortcut-native-tests.log 2>&1 || { tail -n 120 build/shortcut-native-tests.log; exit 1; }
+          tail -n 40 build/shortcut-native-tests.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shortcut-native-test-results
+          path: |
+            build/shortcut-native-tests.log
+            build/shortcut-native-tests.xcresult
           retention-days: 14
 

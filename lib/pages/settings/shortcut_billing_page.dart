@@ -43,7 +43,10 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
         .where((l) => !l.isShared && l.type == 'personal')
         .toList();
     accounts = (await repo.getAllAccounts()).where((a) => !a.hidden).toList();
-    categories = await repo.getUsableCategories('expense');
+    categories = [
+      ...await repo.getUsableCategories('expense'),
+      ...await repo.getUsableCategories('income')
+    ];
     tags = await repo.getAllTags();
     rules = await store.rules();
     receipts = (await store.db
@@ -71,7 +74,7 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
 
   Future<void> editRule([Map<String, dynamic>? existing]) async {
     if (categories.isEmpty) {
-      message('请先创建支出分类');
+      message('请先创建收入或支出分类');
       return;
     }
     final name =
@@ -149,7 +152,11 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                             isExpanded: true,
                             items: categories
                                 .map((c) => DropdownMenuItem(
-                                    value: c.id, child: Text(c.name)))
+                                    value: c.id,
+                                    child: Text((c.kind == 'income'
+                                            ? '收入 · '
+                                            : '支出 · ') +
+                                        c.name)))
                                 .toList(),
                             onChanged: (v) => update(() => categoryId = v)),
                         TextField(

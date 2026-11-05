@@ -35,7 +35,7 @@ void main() {
     await tester.enterText(find.byType(TextField).at(2), '42');
     await tester.tap(find.text('目标分类'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('自建餐饮').last);
+    await tester.tap(find.text('支出 · 自建餐饮').last);
     await tester.pumpAndSettle();
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();

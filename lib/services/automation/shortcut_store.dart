@@ -23,7 +23,8 @@ class ShortcutStore {
     };
   }
 
-  Future<Map<String, dynamic>> commit(ShortcutSubmission request) async {
+  Future<Map<String, dynamic>> commit(ShortcutSubmission request,
+      {bool validateOnly = false}) async {
     final digest = sha256.convert(utf8.encode(request.canonical)).toString();
     try {
       return await db.transaction(() async {
@@ -56,24 +57,39 @@ class ShortcutStore {
         }
         final scale =
             [1, 10, 100, 1000, 10000][shortcutCurrencyDigits(ledger.currency)];
-        final categoryIds = (await repo.getUsableCategories('expense'))
+        if (request.type == 'transfer') {
+          final destination = await repo.getAccount(request.toAccountId!);
+          if (destination == null ||
+              destination.hidden ||
+              destination.id == account.id ||
+              destination.currency.toUpperCase() != request.currency) {
+            throw const ShortcutFailure('INVALID_REFERENCE', '请选择不同的有效同币种转入账户');
+          }
+        }
+        final categoryIds = (await repo.getUsableCategories(request.type))
             .map((c) => c.id)
             .toSet();
         final tagIds = (await repo.getAllTags()).map((t) => t.id).toSet();
         for (final entry in request.entries) {
-          if (!categoryIds.contains(entry.categoryId) ||
+          if ((request.type != 'transfer' &&
+                  !categoryIds.contains(entry.categoryId)) ||
               !tagIds.containsAll(entry.tagIds)) {
             throw const ShortcutFailure('INVALID_REFERENCE', '分类或标签已失效，请重新选择');
           }
         }
+        if (validateOnly) return {'status': 'valid'};
+        final transferCategoryId = request.type == 'transfer'
+            ? (await repo.getTransferCategory()).id
+            : null;
         final ids = await repo.insertTransactionsBatchWithRelations(
           transactions: request.entries
               .map((e) => TransactionsCompanion.insert(
                     ledgerId: request.ledgerId,
-                    type: 'expense',
+                    type: request.type,
                     amount: e.amountMinor / scale,
-                    categoryId: d.Value(e.categoryId),
+                    categoryId: d.Value(transferCategoryId ?? e.categoryId),
                     accountId: d.Value(request.accountId),
+                    toAccountId: d.Value(request.toAccountId),
                     happenedAt: d.Value(request.occurredAt),
                     note: d.Value(e.note),
                     currencyCode: d.Value(ledger.currency),
@@ -102,6 +118,7 @@ class ShortcutStore {
           'status': 'committed',
           'transactionIds': ids,
           'count': ids.length,
+          'type': request.type,
           'totalAmountMinor': request.originalAmountMinor,
           'currency': ledger.currency,
           'minorDigits': shortcutCurrencyDigits(ledger.currency),
@@ -139,7 +156,10 @@ class ShortcutStore {
         (rule['name'] as String).trim().isEmpty) {
       throw const ShortcutFailure('INVALID_RULE', '请填写规则名称、关键词及有效匹配方式');
     }
-    final cats = await repo.getUsableCategories('expense');
+    final cats = [
+      ...await repo.getUsableCategories('expense'),
+      ...await repo.getUsableCategories('income')
+    ];
     if (rule['ledger_id'] != null) {
       final ledger = await repo.getLedgerById(rule['ledger_id'] as int);
       if (ledger == null || ledger.isShared || ledger.type != 'personal') {
@@ -147,7 +167,7 @@ class ShortcutStore {
       }
     }
     if (!cats.any((c) => c.id == rule['category_id'])) {
-      throw const ShortcutFailure('INVALID_REFERENCE', '请选择有效支出分类');
+      throw const ShortcutFailure('INVALID_REFERENCE', '请选择有效的收入或支出分类');
     }
     await db.customStatement(
         'INSERT OR REPLACE INTO shortcut_rules '

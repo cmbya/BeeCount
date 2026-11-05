@@ -109,8 +109,7 @@ void main() {
     expect(called, 1);
   });
 
-  test(
-      'image mode keeps candidates separate and blocks currency/type conflicts',
+  test('image mode keeps candidates separate and blocks currency conflicts',
       () async {
     final service = ShortcutService(container, extract: (prompt, image) async {
       expect(image, isNotNull);
@@ -129,9 +128,9 @@ void main() {
     });
     expect(result['status'], 'draft');
     expect(result['candidates'], hasLength(2));
-    for (final c in result['candidates'] as List) {
-      expect(c['blocked'], true);
-    }
+    expect((result['candidates'] as List).first['blocked'], true);
+    expect((result['candidates'] as List).last['blocked'], false);
+    expect((result['candidates'] as List).last['type'], 'income');
     expect(await db.select(db.transactions).get(), isEmpty);
   });
 

@@ -73,6 +73,102 @@ void main() {
   Matcher failure(String code) =>
       isA<ShortcutFailure>().having((e) => e.code, 'code', code);
 
+  test(
+      'income saves one row, increases balance and does not use expense budget',
+      () async {
+    final income = await repo.createCategory(name: '工资', kind: 'income');
+    final budget =
+        await repo.createBudget(ledgerId: ledger, type: 'total', amount: 1000);
+    final data = payload()..['type'] = 'income';
+    data['entries'] = [
+      {
+        ...(data['entries'] as List).first as Map<String, dynamic>,
+        'amountMinor': 30000,
+        'categoryId': income,
+        'excludeFromBudget': false
+      }
+    ];
+    final request = ShortcutSubmission.fromJson(data);
+    expect(
+        (await store.commit(request, validateOnly: true))['status'], 'valid');
+    expect(await count('transactions'), 0);
+    final result = await store.commit(request);
+    expect(result['type'], 'income');
+    expect(result['count'], 1);
+    expect(await repo.getAccountBalance(account), 300);
+    expect((await repo.getBudgetUsage(budget, DateTime(2026, 11, 5))).used, 0);
+    expect((await store.commit(request))['replayed'], true);
+  });
+
+  test('transfer uses one transfer row and moves balances without expense',
+      () async {
+    final target = await repo.createAccount(ledgerId: ledger, name: '银行卡');
+    final data = payload()..['type'] = 'transfer';
+    data['toAccountId'] = target;
+    data['entries'] = [
+      {
+        ...(data['entries'] as List).first as Map<String, dynamic>,
+        'amountMinor': 30000,
+        'categoryId': null
+      }
+    ];
+    final request = ShortcutSubmission.fromJson(data);
+    final result = await store.commit(request);
+    expect(result['count'], 1);
+    expect(await count('transactions'), 1);
+    final row = (await db.select(db.transactions).get()).single;
+    expect(row.type, 'transfer');
+    expect(row.toAccountId, target);
+    expect((await repo.getTransferCategory()).id, row.categoryId);
+    expect(await repo.getAccountBalance(account), -300);
+    expect(await repo.getAccountBalance(target), 300);
+    await store.commit(request);
+    expect(await count('transactions'), 1);
+  });
+
+  test('invalid transfer destination and non-expense split never write',
+      () async {
+    final foreign = await repo.createAccount(
+        ledgerId: ledger, name: 'USD', currency: 'USD');
+    for (final target in [account, foreign, 999999]) {
+      final data = payload()..['type'] = 'transfer';
+      data['toAccountId'] = target;
+      data['entries'] = [
+        {
+          ...(data['entries'] as List).first as Map<String, dynamic>,
+          'amountMinor': 30000,
+          'categoryId': null
+        }
+      ];
+      try {
+        await store.commit(ShortcutSubmission.fromJson(data));
+        fail('must reject');
+      } on ShortcutFailure catch (e) {
+        expect(e.code, 'INVALID_REFERENCE');
+      }
+    }
+    for (final type in ['income', 'transfer']) {
+      expect(() => ShortcutSubmission.fromJson(payload()..['type'] = type),
+          throwsA(failure('INVALID_REQUEST')));
+    }
+    expect(await count('transactions'), 0);
+    expect(await count('shortcut_receipts'), 0);
+  });
+
+  test('switching ledger validates selected currency and category kind',
+      () async {
+    final other = await repo.createLedger(name: '其他账本');
+    final data = payload()..['ledgerId'] = other;
+    await store.commit(ShortcutSubmission.fromJson(data));
+    expect(
+        (await db.select(db.transactions).get())
+            .every((t) => t.ledgerId == other),
+        true);
+    final wrong = payload()..['currency'] = 'USD';
+    await expectLater(store.commit(ShortcutSubmission.fromJson(wrong)),
+        throwsA(failure('REQUEST_CONFLICT')));
+  });
+
   test('ledger precision drives committed native amounts', () async {
     for (final currency in ['JPY', 'KWD', 'USD']) {
       final id = await repo.createLedger(name: currency, currency: currency);
