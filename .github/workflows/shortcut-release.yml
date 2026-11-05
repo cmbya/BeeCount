@@ -8,91 +8,95 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: "iOS Shortcut Billing run ID"
+        description: "Completed iOS Shortcut Billing run ID (tests and packaging must pass)"
         required: true
-        default: "42052417993"
-  push:
-    branches: [main]
-    paths: [".github/workflows/shortcut-release.yml"]
+        type: string
 
+# No push trigger: editing release configuration must not publish an old IPA.
 permissions:
-  actions: write
+  actions: read
   contents: write
 
 concurrency:
-  group: ios-shortcut-release-${{ github.event.workflow_run.id || inputs.run_id || '42052417993' }}
+  group: ios-shortcut-release-${{ github.event.workflow_run.id || inputs.run_id }}
   cancel-in-progress: false
 
 jobs:
   publish:
     if: github.repository == 'cmbya/BeeCount' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 10
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      SOURCE_RUN: ${{ github.event.workflow_run.id || inputs.run_id || '42052417993' }}
+      SOURCE_RUN: ${{ github.event.workflow_run.id || inputs.run_id }}
     steps:
-      - name: Wait for compiled IPA without waiting for tests
+      - name: Verify completed source run and core tests
         run: |
           python3 - <<'PY'
-          import json, os, subprocess, time
+          import json, os, subprocess
           repo, source = os.environ['GH_REPO'], os.environ['SOURCE_RUN']
+          if not source.isdigit():
+              raise RuntimeError('A numeric source run ID is required')
           def api(path):
               return json.loads(subprocess.check_output(['gh', 'api', path]))
-          for attempt in range(180):
-              run = api(f'repos/{repo}/actions/runs/{source}')
-              assert run['name'] == 'iOS Shortcut Billing', 'Unexpected workflow'
-              assert run['head_branch'] == 'main', 'Only main builds can be published'
-              assert run['head_repository']['full_name'] == repo, 'Unexpected source repository'
-              jobs = api(f'repos/{repo}/actions/runs/{source}/jobs')['jobs']
-              steps = [s for j in jobs for s in j.get('steps', [])]
-              built = any(s['name'] == 'Build unsigned iOS app' and s['conclusion'] == 'success' for s in steps)
-              packaged = any(s['name'] == 'Package unsigned IPA for personal signing' and s['conclusion'] == 'success' for s in steps)
-              artifacts = api(f'repos/{repo}/actions/runs/{source}/artifacts')['artifacts']
-              ready = any(a['name'] == 'BeeCount-shortcut-unsigned' and not a['expired'] for a in artifacts)
-              if built and packaged and ready:
-                  with open(os.environ['GITHUB_ENV'], 'a') as out:
-                      out.write('SOURCE_SHA=' + run['head_sha'] + chr(10))
-                      out.write('SOURCE_NUMBER=' + str(run['run_number']) + chr(10))
-                  if run['status'] != 'completed':
-                      subprocess.run(['gh', 'api', '--method', 'POST', f'repos/{repo}/actions/runs/{source}/cancel'], check=False)
-                  print('Compiled IPA is ready; publishing without waiting for tests.')
-                  break
-              if run['status'] == 'completed':
-                  raise RuntimeError('Build completed without a successfully packaged IPA')
-              print('Waiting for IPA compilation and packaging...', flush=True)
-              time.sleep(10)
-          else:
-              raise TimeoutError('Compiled IPA was not available in time')
+          def require(condition, message):
+              if not condition:
+                  raise RuntimeError(message)
+          run = api(f'repos/{repo}/actions/runs/{source}')
+          require(run['name'] == 'iOS Shortcut Billing', 'Unexpected workflow')
+          require(run.get('path') == '.github/workflows/shortcut-ios.yml', 'Unexpected workflow path')
+          require(run['head_branch'] == 'main', 'Only main builds can be published')
+          require(run['head_repository']['full_name'] == repo, 'Unexpected source repository')
+          require(run['status'] == 'completed' and run['conclusion'] == 'success',
+                  'Source run must finish successfully; early IPA artifacts remain available from Actions')
+          jobs = api(f'repos/{repo}/actions/runs/{source}/jobs?per_page=100')['jobs']
+          for name in ['Core shortcut tests', 'iOS build and package']:
+              matches = [job for job in jobs if job['name'] == name]
+              require(len(matches) == 1 and matches[0]['conclusion'] == 'success',
+                      f'Required job not successful: {name}')
+          build = next(job for job in jobs if job['name'] == 'iOS build and package')
+          for name in ['Build unsigned iOS app', 'Package unsigned IPA for personal signing',
+                       'Upload unsigned IPA immediately']:
+              require(any(step['name'] == name and step['conclusion'] == 'success'
+                          for step in build.get('steps', [])), f'Required step not successful: {name}')
+          artifacts = api(f'repos/{repo}/actions/runs/{source}/artifacts?per_page=100')['artifacts']
+          require(any(a['name'] == 'BeeCount-shortcut-unsigned' and not a['expired']
+                      for a in artifacts), 'Compiled IPA artifact is missing or expired')
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write('SOURCE_SHA=' + run['head_sha'] + chr(10))
+              out.write('SOURCE_NUMBER=' + str(run['run_number']) + chr(10))
+          print('Core tests and packaging passed. No polling, cancellation or recompilation.')
           PY
       - name: Download compiled IPA
         run: |
+          set -euo pipefail
           gh run download "$SOURCE_RUN" --repo "$GH_REPO" --name BeeCount-shortcut-unsigned --dir package
           test -s package/BeeCount-shortcut-unsigned.ipa
           unzip -tq package/BeeCount-shortcut-unsigned.ipa
           cd package
-          sha256sum BeeCount-shortcut-unsigned.ipa > SHA256SUMS.txt
+          shasum -a 256 -c SHA256SUMS.txt
       - name: Publish downloadable release assets
         run: |
+          set -euo pipefail
           TAG="ios-shortcut-3.9.0-build-$SOURCE_NUMBER"
           cat > release-notes.md <<EOF
-          iOS 快捷确认记账个人 fork，基于 BeeCount 3.9.0。
+          iOS 快捷记账个人 fork，基于 BeeCount 3.9.0。
 
-          支持图片 AI、本地 OCR＋文字 AI、系统菜单编辑、支出拆分、多标签、预算排除、个人规则可视化管理，以及收入、转账和账本切换。最终确认一次直接入账，支持原子保存、防重复与提交结果查询。
+          下载 BeeCount-shortcut-unsigned.ipa；这是未签名安装包，需自行签名安装。SHA256SUMS.txt 用于校验文件。
 
-          下载下方 BeeCount-shortcut-unsigned.ipa；这是未签名安装包，需要自行签名安装，不能直接点开安装。SHA256SUMS.txt 用于校验下载文件。
+          核心快捷记账自动化测试与 iOS Release 编译并行执行，均已通过后发布本预发布版。复用原构建的 IPA，不重新编译。核心测试通过不等于真实 AI 识别和目标 iPhone 弹窗、后台执行已验收，真机测试仍待完成。
 
-          此包来自已完成 iOS Release 编译的原始构建，没有重新编译。按要求编译和打包后直接发布，不等待自动化测试。目标 iPhone 17 / iOS 27.3 beta 真机验收仍待完成，因此标记为预发布版。
+          编译完成时即可从 Actions 附件先行下载；测试未完成或失败时，不代表完整验证通过。
 
           - 源码提交：https://github.com/$GH_REPO/commit/$SOURCE_SHA
-          - 构建记录：https://github.com/$GH_REPO/actions/runs/$SOURCE_RUN
+          - 构建和测试：https://github.com/$GH_REPO/actions/runs/$SOURCE_RUN
           - 安装与快捷指令配置：https://github.com/$GH_REPO/blob/$SOURCE_SHA/docs/ios-shortcut-billing.md
           - 需求验收对照：https://github.com/$GH_REPO/blob/$SOURCE_SHA/docs/ios-shortcut-acceptance.md
           EOF
           if ! gh release view "$TAG" --repo "$GH_REPO" > /dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GH_REPO" --target "$GITHUB_SHA" --title "BeeCount iOS 快捷记账 3.9.0 · Build $SOURCE_NUMBER" --notes-file release-notes.md --prerelease --draft --latest=false
+            gh release create "$TAG" --repo "$GH_REPO" --target "$SOURCE_SHA" --title "BeeCount iOS 快捷记账 3.9.0 · Build $SOURCE_NUMBER" --notes-file release-notes.md --prerelease --draft --latest=false
           fi
           gh release upload "$TAG" package/BeeCount-shortcut-unsigned.ipa package/SHA256SUMS.txt --repo "$GH_REPO" --clobber
-          gh release edit "$TAG" --repo "$GH_REPO" --draft=false
+          gh release edit "$TAG" --repo "$GH_REPO" --draft=false --prerelease --notes-file release-notes.md
           echo "Release: https://github.com/$GH_REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"

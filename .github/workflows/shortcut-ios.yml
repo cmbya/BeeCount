@@ -3,7 +3,14 @@ name: iOS Shortcut Billing
 on:
   push:
     branches: [main]
-    paths: ["ios/**", "lib/**", "test/services/shortcut*", ".github/workflows/shortcut-ios.yml"]
+    paths:
+      - "ios/**"
+      - "lib/**"
+      - "packages/**"
+      - "pubspec.yaml"
+      - "pubspec.lock"
+      - "test/services/shortcut*"
+      - ".github/workflows/shortcut-ios.yml"
   workflow_dispatch:
 
 permissions:
@@ -13,28 +20,115 @@ concurrency:
   group: ios-shortcut-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  FLUTTER_VERSION: "3.27.3"
+  CI: "true"
+
 jobs:
-  verify:
+  # No needs: tests and packaging run independently, subject to runner capacity.
+  core-tests:
+    name: Core shortcut tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Cache pub dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: shortcut-pub-${{ runner.os }}-${{ runner.arch }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('pubspec.lock', '**/pubspec.yaml') }}
+          restore-keys: |
+            shortcut-pub-${{ runner.os }}-${{ runner.arch }}-${{ env.FLUTTER_VERSION }}-
+      - name: Get dependencies
+        run: flutter pub get
+      - name: Run focused shortcut tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          # Existing files cover draft recognition, local HTTP transport,
+          # rules/settings, budget flags, atomic split commits and idempotency.
+          # No production AI credentials, device, full-suite or coverage run.
+          flutter test --no-pub --reporter expanded test/services/shortcut*_test.dart 2>&1 | tee test-results/shortcut-tests.log
+      - name: Upload core test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shortcut-core-test-results
+          path: test-results/shortcut-tests.log
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Test summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          echo "### Core shortcut tests: $JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
+          echo "Focused Flutter tests only. No paid AI calls or iOS simulator. This does not verify physical-device menus." >> "$GITHUB_STEP_SUMMARY"
+
+  ios-build:
+    name: iOS build and package
     runs-on: macos-15-intel
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.27.3"
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
-      - run: flutter pub get
+      - name: Cache pub dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: shortcut-pub-${{ runner.os }}-${{ runner.arch }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('pubspec.lock', '**/pubspec.yaml') }}
+          restore-keys: |
+            shortcut-pub-${{ runner.os }}-${{ runner.arch }}-${{ env.FLUTTER_VERSION }}-
+      - name: Cache CocoaPods downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods
+          key: shortcut-pods-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ios/Podfile', 'ios/Podfile.lock', 'pubspec.lock') }}
+          restore-keys: |
+            shortcut-pods-${{ runner.os }}-${{ runner.arch }}-
+      - name: Get dependencies
+        run: flutter pub get
       - name: Build unsigned iOS app
-        run: flutter build ios --release --no-codesign --build-name=3.9.0 --build-number=$GITHUB_RUN_NUMBER
+        run: flutter build ios --release --no-pub --no-codesign --build-name=3.9.0 --build-number=$GITHUB_RUN_NUMBER
       - name: Package unsigned IPA for personal signing
         run: |
+          set -euo pipefail
           mkdir -p build/shortcut-package/Payload
           cp -R build/ios/iphoneos/Runner.app build/shortcut-package/Payload/
           cd build/shortcut-package
-          zip -qr BeeCount-shortcut-unsigned.ipa Payload
-      - uses: actions/upload-artifact@v4
+          zip -qry BeeCount-shortcut-unsigned.ipa Payload
+          unzip -tq BeeCount-shortcut-unsigned.ipa
+          shasum -a 256 BeeCount-shortcut-unsigned.ipa > SHA256SUMS.txt
+      # Upload as soon as this job finishes, without waiting for core-tests.
+      # An available IPA is NOT a claim that tests or device acceptance passed.
+      - name: Upload unsigned IPA immediately
+        uses: actions/upload-artifact@v4
         with:
           name: BeeCount-shortcut-unsigned
-          path: build/shortcut-package/BeeCount-shortcut-unsigned.ipa
+          path: |
+            build/shortcut-package/BeeCount-shortcut-unsigned.ipa
+            build/shortcut-package/SHA256SUMS.txt
+          if-no-files-found: error
+          compression-level: 0
           retention-days: 14
+      - name: Build summary
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          echo "### iOS packaging: $JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
+          echo "If uploaded, the unsigned IPA is available in this run's artifacts. Check Core shortcut tests separately; pending or failed tests do not block artifact upload. Physical-device acceptance is still required." >> "$GITHUB_STEP_SUMMARY"
