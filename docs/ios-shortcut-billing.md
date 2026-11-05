@@ -4,7 +4,7 @@
 
 ## 安装配置
 
-1. 在本仓库 Actions 打开 **iOS Shortcut Billing**，下载成功运行的 **BeeCount-shortcut-unsigned** 附件。IPA 未签名，需自行签名安装，不能直接点开安装。上游商店版本不包含此 fork 的改动。
+1. 在本仓库 [Releases](https://github.com/cmbya/BeeCount/releases) 下载 iOS 快捷记账预发布版的 **BeeCount-shortcut-unsigned.ipa**。IPA 未签名，需自行签名安装，不能直接点开安装。上游商店版本不包含此 fork 的改动。后续 main 的快捷记账检查全部通过后自动发布，Release 同时提供 SHA256 校验文件；Actions 仍保留短期测试附件。
 2. 先启动 App，创建个人账本、同币种付款账户、支出分类和家庭/个人等标签。预算沿用现有总预算和分类预算。
 3. 在智能记账设置进入 **iOS 快捷确认记账**，设置默认账本、账户、识别方式、默认标签及预算标记，并管理个人分类规则。
 4. 在现有 AI 服务配置中设置文字、视觉能力，复用项目已有智谱及 OpenAI 兼容服务。图片模式需要视觉模型，文字模式需要文字模型。不要把密钥写到快捷指令、JSON 或仓库。

@@ -1,0 +1,79 @@
+name: Publish iOS Shortcut Release
+
+on:
+  workflow_run:
+    workflows: ["iOS Shortcut Billing"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Successful iOS Shortcut Billing run ID"
+        required: true
+        default: "42021710688"
+  push:
+    branches: [main]
+    paths: [".github/workflows/shortcut-release.yml"]
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: ios-shortcut-release-${{ github.event.workflow_run.id || inputs.run_id || '42021710688' }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'cmbya/BeeCount' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_RUN: ${{ github.event.workflow_run.id || inputs.run_id || '42021710688' }}
+    steps:
+      - name: Verify successful source build
+        run: |
+          gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN" > source-run.json
+          python3 - <<'PY'
+          import json, os
+          run = json.load(open('source-run.json'))
+          assert run['name'] == 'iOS Shortcut Billing', 'Unexpected workflow'
+          assert run['status'] == 'completed' and run['conclusion'] == 'success', 'Build must pass all checks'
+          assert run['head_branch'] == 'main', 'Only main builds can be published'
+          assert run['head_repository']['full_name'] == os.environ['GH_REPO'], 'Unexpected source repository'
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write('SOURCE_SHA=' + run['head_sha'] + chr(10))
+              out.write('SOURCE_NUMBER=' + str(run['run_number']) + chr(10))
+          PY
+      - name: Download and verify the tested IPA
+        run: |
+          gh run download "$SOURCE_RUN" --repo "$GH_REPO" --name BeeCount-shortcut-unsigned --dir package
+          test -s package/BeeCount-shortcut-unsigned.ipa
+          unzip -tq package/BeeCount-shortcut-unsigned.ipa
+          cd package
+          sha256sum BeeCount-shortcut-unsigned.ipa > SHA256SUMS.txt
+      - name: Publish downloadable release assets
+        run: |
+          TAG="ios-shortcut-3.9.0-build-$SOURCE_NUMBER"
+          cat > release-notes.md <<EOF
+          iOS 快捷确认记账个人 fork，基于 BeeCount 3.9.0。
+
+          支持图片 AI、本地 OCR＋文字 AI、系统菜单编辑、支出拆分、多标签、预算排除、个人规则可视化管理，以及收入、转账和账本切换。最终确认一次直接入账，支持原子保存、防重复与提交结果查询。
+
+          下载下方 BeeCount-shortcut-unsigned.ipa；这是未签名安装包，需要自行签名安装，不能直接点开安装。SHA256SUMS.txt 用于校验下载文件。
+
+          此包来自已经通过全部检查的原始构建，没有重新编译。检查包括 Flutter 静态分析、业务测试、iOS Release 编译与原生模拟器测试。目标 iPhone 17 / iOS 27.3 beta 真机验收仍待完成，因此标记为预发布版。
+
+          - 源码提交：https://github.com/$GH_REPO/commit/$SOURCE_SHA
+          - 构建与测试：https://github.com/$GH_REPO/actions/runs/$SOURCE_RUN
+          - 安装与快捷指令配置：https://github.com/$GH_REPO/blob/$SOURCE_SHA/docs/ios-shortcut-billing.md
+          - 需求验收对照：https://github.com/$GH_REPO/blob/$SOURCE_SHA/docs/ios-shortcut-acceptance.md
+          EOF
+          if ! gh release view "$TAG" --repo "$GH_REPO" > /dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GH_REPO" --target "$SOURCE_SHA" --title "BeeCount iOS 快捷记账 3.9.0 · Build $SOURCE_NUMBER" --notes-file release-notes.md --prerelease --draft --latest=false
+          fi
+          gh release upload "$TAG" package/BeeCount-shortcut-unsigned.ipa package/SHA256SUMS.txt --repo "$GH_REPO" --clobber
+          gh release edit "$TAG" --repo "$GH_REPO" --draft=false
+          echo "Release: https://github.com/$GH_REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
