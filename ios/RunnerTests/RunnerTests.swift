@@ -90,9 +90,9 @@ class RunnerTests: XCTestCase {
     XCTAssertFalse(TextBillingDraftIntent.isDiscoverable)
     XCTAssertFalse(EditBillingDraftIntent.isDiscoverable)
     XCTAssertFalse(CommitConfirmedBillingIntent.isDiscoverable)
-    XCTAssertFalse(CustomExpenseBillingIntent.isDiscoverable)
-    XCTAssertFalse(CustomIncomeBillingIntent.isDiscoverable)
-    XCTAssertFalse(CustomTransferBillingIntent.isDiscoverable)
+    XCTAssertTrue(CustomExpenseBillingIntent.isDiscoverable)
+    XCTAssertTrue(CustomIncomeBillingIntent.isDiscoverable)
+    XCTAssertTrue(CustomTransferBillingIntent.isDiscoverable)
     XCTAssertFalse(RecognizeConfirmBillingIntent.isDiscoverable)
     XCTAssertTrue(ImageConfirmBillingIntent.isDiscoverable)
     XCTAssertTrue(TextConfirmBillingIntent.isDiscoverable)
@@ -385,6 +385,67 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(result["originalAmountMinor"] as? Int, 30000)
     XCTAssertEqual(validations, 1)
     XCTAssertTrue(choices.isEmpty)
+  }
+
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testManualDraftPreservesSuppliedValuesWithoutRecognitionOrCommit() async throws {
+    for type in ["expense", "income", "transfer"] {
+      let date = Date(timeIntervalSince1970: 1793853165)
+      var operations: [String] = []
+      let draft = try await CustomBilling.draft(type: type,
+          ledger: BillingLedger(id: 2, name: "家庭"),
+          category: type == "transfer" ? nil : BillingCategory(id: 10, name: "自建"),
+          amount: "127.89", date: date, note: "我填写的备注；订单号也保留",
+          account: BillingAccount(id: 1, name: "支付宝"),
+          destination: type == "transfer" ? BillingAccount(id: 2, name: "银行卡") : nil,
+          tags: [BillingTag(id: 4, name: "家庭")], excluded: true,
+          call: { request in
+            operations.append(request["operation"] as? String ?? "")
+            XCTAssertEqual(request["ledgerId"] as? Int, 2)
+            XCTAssertEqual(request["type"] as? String, type)
+            return self.editorOptions(type, ledger: 2)
+          })
+      let object = try ConfirmedBilling.decode(draft)
+      let candidate = try XCTUnwrap((object["candidates"] as? [[String: Any]])?.first)
+      XCTAssertEqual(operations, ["options"])
+      XCTAssertEqual(object["status"] as? String, "draft")
+      XCTAssertEqual(object["ledgerId"] as? Int, 2)
+      XCTAssertEqual(candidate["type"] as? String, type)
+      XCTAssertEqual(candidate["amountMinor"] as? Int, 12789)
+      XCTAssertEqual(candidate["note"] as? String, "我填写的备注；订单号也保留")
+      XCTAssertEqual(candidate["occurredAt"] as? String, ISO8601DateFormatter().string(from: date))
+      XCTAssertEqual(candidate["accountId"] as? Int, 1)
+      XCTAssertEqual(candidate["tagIds"] as? [Int], [4])
+      XCTAssertEqual(candidate["excludeFromBudget"] as? Bool, type == "expense")
+      if type == "transfer" { XCTAssertEqual(candidate["toAccountId"] as? Int, 2) }
+      else { XCTAssertEqual(candidate["categoryId"] as? Int, 10) }
+    }
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testManualMissingFieldsStayEditableAndTimeDefaultsToNow() async throws {
+    var requests: [[String: Any]] = []
+    let before = Date().addingTimeInterval(-1)
+    let draft = try await CustomBilling.draft(type: "expense", ledger: nil, category: nil,
+        amount: nil, date: nil, note: nil, account: nil, tags: [], call: { request in
+          requests.append(request)
+          return self.editorOptions()
+        })
+    let object = try ConfirmedBilling.decode(draft)
+    let candidate = try XCTUnwrap((object["candidates"] as? [[String: Any]])?.first)
+    XCTAssertEqual(requests.count, 1)
+    XCTAssertNil(requests.first?["ledgerId"])
+    XCTAssertNil(candidate["amountMinor"])
+    XCTAssertNil(candidate["accountId"])
+    XCTAssertNil(candidate["categoryId"])
+    XCTAssertEqual(candidate["note"] as? String, "")
+    XCTAssertEqual(candidate["tagIds"] as? [Int], [])
+    let time = try XCTUnwrap(ISO8601DateFormatter().date(from: candidate["occurredAt"] as? String ?? ""))
+    XCTAssertGreaterThanOrEqual(time, before)
+    XCTAssertLessThanOrEqual(time, Date())
   }
 
   private func screenshot(width: CGFloat, height: CGFloat) throws -> Data {

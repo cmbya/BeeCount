@@ -799,17 +799,18 @@ struct BillingTagQuery: EntityStringQuery {
 @available(iOS 16.0, *)
 @MainActor
 enum CustomBilling {
-    static func draft(type: String, ledger: BillingLedger?, category: BillingCategory?, amount: String?, date: Date?, note: String?, account: BillingAccount?, destination: BillingAccount? = nil, tags: [BillingTag]?, excluded: Bool = false) async throws -> String {
+    static func draft(type: String, ledger: BillingLedger?, category: BillingCategory?, amount: String?, date: Date?, note: String?, account: BillingAccount?, destination: BillingAccount? = nil, tags: [BillingTag]?, excluded: Bool = false,
+                      call: ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call) async throws -> String {
         var request: [String: Any] = ["operation": "options", "type": type]
         if let ledger { request["ledgerId"] = ledger.id }
-        let options = try await ConfirmedBilling.call(request)
+        let options = try await call(request)
         let defaults = options["defaults"] as? [String: Any] ?? [:]
         var candidate: [String: Any] = ["type": type, "note": note ?? "", "excludeFromBudget": type == "expense" && excluded, "tagIds": tags?.map { $0.id } ?? defaults["tagIds"] as? [Int] ?? []]
         if let amount, !amount.isEmpty { candidate["amountMinor"] = try ConfirmedBilling.minor(amount, digits: options["minorDigits"] as? Int ?? 2) }
         if let category { candidate["categoryId"] = category.id }
         if let account { candidate["accountId"] = account.id }
         if let destination { candidate["toAccountId"] = destination.id }
-        if let date { candidate["occurredAt"] = ISO8601DateFormatter().string(from: date) }
+        candidate["occurredAt"] = ISO8601DateFormatter().string(from: date ?? Date())
         return try ConfirmedBilling.encode(["status": "draft", "requestId": UUID().uuidString, "ledgerId": options["ledgerId"]!, "currency": options["currency"]!, "candidates": [candidate]])
     }
     static func result(_ text: String) throws -> IntentDialog {
@@ -821,12 +822,12 @@ enum CustomBilling {
 
 @available(iOS 16.0, *)
 struct CustomExpenseBillingIntent: AppIntent {
-    // Kept for existing shortcuts; use the image/text recognition actions.
-    static var isDiscoverable: Bool = false
+    // Manual preset action: no AI, always review before committing.
+    static var isDiscoverable: Bool = true
     static var title: LocalizedStringResource = "自定义支出账单"
-    static var description: LocalizedStringResource = "直接填写字段，运行后在系统菜单核对修改，最后确认一次入账。"
+    static var description: LocalizedStringResource = "手动填写字段或接入快捷指令变量，不调用 AI；运行后弹出账单确认菜单，可修改，确认后直接入账。"
     static var openAppWhenRun = false
-        @Parameter(title: "账本") var ledger: BillingLedger?
+    @Parameter(title: "账本") var ledger: BillingLedger?
     @Parameter(title: "分类") var category: BillingCategory?
     @Parameter(title: "金额") var amount: String?
     @Parameter(title: "时间") var date: Date?
@@ -854,12 +855,12 @@ struct CustomExpenseBillingIntent: AppIntent {
 
 @available(iOS 16.0, *)
 struct CustomIncomeBillingIntent: AppIntent {
-    // Kept for existing shortcuts; use the image/text recognition actions.
-    static var isDiscoverable: Bool = false
+    // Manual preset action: no AI, always review before committing.
+    static var isDiscoverable: Bool = true
     static var title: LocalizedStringResource = "自定义收入账单"
-    static var description: LocalizedStringResource = "直接填写字段，运行后在系统菜单核对修改，最后确认一次入账。"
+    static var description: LocalizedStringResource = "手动填写字段或接入快捷指令变量，不调用 AI；运行后弹出账单确认菜单，可修改，确认后直接入账。"
     static var openAppWhenRun = false
-        @Parameter(title: "账本") var ledger: BillingLedger?
+    @Parameter(title: "账本") var ledger: BillingLedger?
     @Parameter(title: "分类") var category: BillingCategory?
     @Parameter(title: "金额") var amount: String?
     @Parameter(title: "时间") var date: Date?
@@ -886,12 +887,12 @@ struct CustomIncomeBillingIntent: AppIntent {
 
 @available(iOS 16.0, *)
 struct CustomTransferBillingIntent: AppIntent {
-    // Kept for existing shortcuts; use the image/text recognition actions.
-    static var isDiscoverable: Bool = false
+    // Manual preset action: no AI, always review before committing.
+    static var isDiscoverable: Bool = true
     static var title: LocalizedStringResource = "自定义转账账单"
-    static var description: LocalizedStringResource = "直接填写字段，运行后在系统菜单核对修改，最后确认一次入账。"
+    static var description: LocalizedStringResource = "手动填写字段或接入快捷指令变量，不调用 AI；运行后弹出账单确认菜单，可修改，确认后直接入账。"
     static var openAppWhenRun = false
-        @Parameter(title: "账本") var ledger: BillingLedger?
+    @Parameter(title: "账本") var ledger: BillingLedger?
     @Parameter(title: "金额") var amount: String?
     @Parameter(title: "时间") var date: Date?
     @Parameter(title: "备注") var note: String?
