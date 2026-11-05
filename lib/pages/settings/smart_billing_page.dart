@@ -12,6 +12,7 @@ import '../../providers/voice_billing_providers.dart';
 import '../ai/ai_settings_page.dart';
 import '../automation/auto_billing_settings_page.dart';
 import 'shortcuts_guide_page.dart';
+import 'shortcut_billing_page.dart';
 import '../../l10n/app_localizations.dart';
 
 /// Google Play 版本(CI 注入)。截屏自动记账依赖 READ_MEDIA_IMAGES,在 Google
@@ -229,6 +230,14 @@ class SmartBillingPage extends ConsumerWidget {
             child: ListView(
               padding: const EdgeInsets.all(16),
               children: [
+                if (Platform.isIOS) ...[
+                  SectionCard(margin: EdgeInsets.zero, child: AppListTile(
+                    leading: Icons.fact_check_outlined, title: 'iOS 快捷确认记账',
+                    subtitle: '确认后入账、拆分、个人分类规则与默认值',
+                    onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ShortcutBillingPage())),
+                  )),
+                  const SizedBox(height: 16),
+                ],
                 // AI设置卡片
                 SectionCard(
                   margin: EdgeInsets.zero,

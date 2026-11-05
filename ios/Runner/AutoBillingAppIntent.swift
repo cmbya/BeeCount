@@ -2,6 +2,7 @@ import Foundation
 import UIKit
 import ImageIO
 import UniformTypeIdentifiers
+import Vision
 
 // 使用条件编译，只在iOS 16+编译AppIntents代码
 #if canImport(AppIntents)
@@ -155,6 +156,339 @@ struct AutoBillingShortcuts: AppShortcutsProvider {
                 "打开\(.applicationName)自动记账"
             ]
         )
+    }
+}
+// MARK: - Confirmed shortcut billing (separate from the legacy automatic action)
+
+@available(iOS 16.0, *)
+private struct ShortcutBillingError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+@available(iOS 16.0, *)
+@MainActor
+private enum ConfirmedBilling {
+    static func encode(_ value: [String: Any]) throws -> String {
+        String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
+    }
+    static func decode(_ text: String) throws -> [String: Any] {
+        guard let data = text.data(using: .utf8), data.count <= 1_000_000,
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ShortcutBillingError(message: "数据格式无效")
+        }
+        return object
+    }
+    static func call(_ payload: [String: Any]) async throws -> [String: Any] {
+        let object = try decode(await AppIntentsBridge.request(payload))
+        if object["status"] as? String == "error" {
+            throw ShortcutBillingError(message: (object["message"] as? String ?? "操作失败") + " [" + (object["code"] as? String ?? "UNKNOWN") + "]")
+        }
+        return object
+    }
+    static func imageData(_ image: IntentFile) throws -> Data {
+        let data = image.fileURL.flatMap { try? Data(contentsOf: $0) } ?? image.data
+        guard !data.isEmpty, data.count <= 40_000_000 else { throw ShortcutBillingError(message: "图片为空或超过 40 MB") }
+        return data
+    }
+    static func recognizeImage(_ image: IntentFile, ocr: Bool, configuration: String?) async throws -> [String: Any] {
+        let data = try imageData(image)
+        var input = try configuration.map(decode) ?? [:]
+        input["operation"] = "recognize"
+        if ocr {
+            let text: String = try await Task.detached {
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.usesLanguageCorrection = true
+                request.recognitionLanguages = ["zh-Hans", "en-US"]
+                try VNImageRequestHandler(data: data).perform([request])
+                return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+            }.value
+            input["mode"] = "text"
+            input["text"] = text
+            // No image path or bytes enter the text request.
+            return try await call(input)
+        }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 1920,
+              ] as CFDictionary),
+              let jpeg = UIImage(cgImage: thumbnail).jpegData(compressionQuality: 0.85) else {
+            throw ShortcutBillingError(message: "无法读取图片")
+        }
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent("confirmed-billing-" + UUID().uuidString + ".jpg")
+        try jpeg.write(to: path, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: path) }
+        input["mode"] = "image"
+        input["imagePath"] = path.path
+        return try await call(input)
+    }
+    static func commit(_ submission: [String: Any]) async throws -> String {
+        guard submission["confirmed"] as? Bool == true,
+              let id = submission["requestId"] as? String else { throw ShortcutBillingError(message: "请先完成草稿确认") }
+        // Only a request ID, no draft/notes/keys, survives interruption.
+        UserDefaults.standard.set(id, forKey: "confirmedBillingLastRequestId")
+        let response = try decode(await AppIntentsBridge.request(["operation": "commit", "submission": submission]))
+        if response["status"] as? String == "committed" { return try encode(response) }
+        if response["code"] as? String == "RESULT_UNKNOWN" {
+            if let found = try? await call(["operation": "query", "requestId": id]), found["status"] as? String == "committed" { return try encode(found) }
+            throw ShortcutBillingError(message: "结果尚未确认。请求 ID：" + id + "。请运行查询快捷记账结果，勿更换 ID 重记。")
+        }
+        throw ShortcutBillingError(message: (response["message"] as? String ?? "提交未完成") + " 请求 ID：" + id)
+    }
+    static func money(_ value: Int) -> String { String(format: "%d.%02d", value / 100, abs(value % 100)) }
+    static func minor(_ text: String) throws -> Int {
+        guard text.range(of: "^[0-9]+(?:\\.[0-9]{1,2})?$", options: .regularExpression) != nil,
+              let decimal = Decimal(string: text, locale: Locale(identifier: "en_US_POSIX")) else { throw ShortcutBillingError(message: "请输入大于零、最多两位小数的金额") }
+        let number = NSDecimalNumber(decimal: decimal * 100)
+        guard number.compare(0) == .orderedDescending, number.compare(999999999999) != .orderedDescending else { throw ShortcutBillingError(message: "金额超出范围") }
+        return number.intValue
+    }
+    static func label(_ id: Int?, _ options: [[String: Any]]) -> String {
+        options.first { $0["id"] as? Int == id }?["name"] as? String ?? "待选择"
+    }
+    static func summary(_ entry: [String: Any], categories: [[String: Any]], tags: [[String: Any]]) -> String {
+        let tagNames = (entry["tagIds"] as? [Int] ?? []).map { label($0, tags) }.joined(separator: "、")
+        return "金额：" + money(entry["amountMinor"] as? Int ?? 0) + "\n分类：" + label(entry["categoryId"] as? Int, categories) +
+            "\n备注：" + (entry["note"] as? String ?? "") + "\n标签：" + (tagNames.isEmpty ? "无" : tagNames) +
+            "\n预算：" + (entry["excludeFromBudget"] as? Bool == true ? "不计入" : "计入")
+    }
+}
+
+@available(iOS 16.0, *)
+struct BillingOptionsIntent: AppIntent {
+    static var title: LocalizedStringResource = "获取快捷记账选项"
+    static var openAppWhenRun = false
+    @Parameter(title: "账本 ID") var ledgerId: Int?
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        var input: [String: Any] = ["operation": "options"]
+        if let ledgerId { input["ledgerId"] = ledgerId }
+        return .result(value: try ConfirmedBilling.encode(await ConfirmedBilling.call(input)))
+    }
+}
+
+@available(iOS 16.0, *)
+struct ImageBillingDraftIntent: AppIntent {
+    static var title: LocalizedStringResource = "图片生成记账草稿"
+    static var description: LocalizedStringResource = "仅识别，不入账。图片将发送给 App 配置的视觉服务。"
+    static var openAppWhenRun = false
+    @Parameter(title: "图片") var image: IntentFile
+    @Parameter(title: "默认配置 JSON") var configuration: String?
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        return .result(value: try ConfirmedBilling.encode(await ConfirmedBilling.recognizeImage(image, ocr: false, configuration: configuration)))
+    }
+}
+
+@available(iOS 16.0, *)
+struct TextBillingDraftIntent: AppIntent {
+    static var title: LocalizedStringResource = "文字生成记账草稿"
+    static var description: LocalizedStringResource = "仅识别，不入账。只发送文字给 App 配置的文字服务，不发送原图。"
+    static var openAppWhenRun = false
+    @Parameter(title: "OCR 文字") var text: String
+    @Parameter(title: "默认配置 JSON") var configuration: String?
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        var input = try configuration.map(ConfirmedBilling.decode) ?? [:]
+        input["operation"] = "recognize"; input["mode"] = "text"; input["text"] = text
+        return .result(value: try ConfirmedBilling.encode(await ConfirmedBilling.call(input)))
+    }
+}
+
+@available(iOS 16.0, *)
+struct CommitConfirmedBillingIntent: AppIntent {
+    static var title: LocalizedStringResource = "提交已确认支出"
+    static var openAppWhenRun = false
+    @Parameter(title: "已确认账单 JSON") var submission: String
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        return .result(value: try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission)))
+    }
+}
+
+@available(iOS 16.0, *)
+struct QueryConfirmedBillingIntent: AppIntent {
+    static var title: LocalizedStringResource = "查询快捷记账结果"
+    static var openAppWhenRun = false
+    @Parameter(title: "请求 ID（留空查最近一次）") var requestId: String?
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        let id = requestId ?? UserDefaults.standard.string(forKey: "confirmedBillingLastRequestId")
+        let input: [String: Any] = id.map { ["operation": "query", "requestId": $0] } ?? ["operation": "recent"]
+        return .result(value: try ConfirmedBilling.encode(await ConfirmedBilling.call(input)))
+    }
+}
+
+@available(iOS 16.0, *)
+struct EditBillingDraftIntent: AppIntent {
+    static var title: LocalizedStringResource = "确认编辑支出草稿"
+    static var description: LocalizedStringResource = "系统菜单编辑、逐笔拆分并最终确认。此动作本身不入账。"
+    static var openAppWhenRun = false
+    @Parameter(title: "草稿 JSON") var draft: String
+    @Parameter(title: "菜单选择") var choice: String?
+    @Parameter(title: "输入内容") var textValue: String?
+
+    @MainActor private func choose(_ values: [String], _ prompt: String) async throws -> String {
+        try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
+    }
+    @MainActor private func input(_ prompt: String) async throws -> String {
+        try await $textValue.requestValue(IntentDialog(stringLiteral: prompt))
+    }
+    @MainActor private func pick(_ values: [[String: Any]], _ prompt: String) async throws -> Int {
+        guard !values.isEmpty else { throw ShortcutBillingError(message: "没有可选项，请先在 App 配置") }
+        let labels = values.enumerated().map { String($0.offset + 1) + ". " + ($0.element["name"] as? String ?? "") }
+        let selected = try await choose(labels, prompt)
+        guard let index = labels.firstIndex(of: selected), let id = values[index]["id"] as? Int else { throw ShortcutBillingError(message: "选项已失效") }
+        return id
+    }
+    @MainActor private func edit(_ initial: [String: Any], categories: [[String: Any]], tags: [[String: Any]]) async throws -> [String: Any] {
+        var entry = initial
+        while true {
+            let selected = try await choose(["完成此笔", "金额", "分类", "备注", "标签", "预算标记", "取消本次字段修改"], ConfirmedBilling.summary(entry, categories: categories, tags: tags))
+            switch selected {
+            case "完成此笔":
+                guard (entry["amountMinor"] as? Int ?? 0) > 0, categories.contains(where: { $0["id"] as? Int == entry["categoryId"] as? Int }) else { continue }
+                return entry
+            case "金额":
+                let value = try await input("当前 " + ConfirmedBilling.money(entry["amountMinor"] as? Int ?? 0) + " 元；输入新金额")
+                if let amount = try? ConfirmedBilling.minor(value) { entry["amountMinor"] = amount }
+            case "分类": entry["categoryId"] = try await pick(categories, "选择支出分类")
+            case "备注":
+                let old = entry["note"] as? String ?? ""
+                let action = try await choose(["编辑", "追加", "清空重填", "保存空备注", "取消修改"], "原备注：" + old)
+                if action == "保存空备注" { entry["note"] = "" }
+                else if action != "取消修改" {
+                    let value = try await input((action == "追加" ? "追加内容；原备注：" : "输入最终备注；原备注：") + old)
+                    entry["note"] = action == "追加" ? old + value : value
+                }
+            case "标签":
+                var selectedTags = entry["tagIds"] as? [Int] ?? []
+                while true {
+                    let labels = tags.map { (selectedTags.contains($0["id"] as? Int ?? -1) ? "✓ " : "○ ") + ($0["name"] as? String ?? "") + " [" + String($0["id"] as? Int ?? -1) + "]" }
+                    let value = try await choose(["完成标签选择", "清空所有标签"] + labels, "可反复点选多个标签")
+                    if value == "完成标签选择" { break }
+                    if value == "清空所有标签" { selectedTags = []; continue }
+                    if let index = labels.firstIndex(of: value), let id = tags[index]["id"] as? Int {
+                        if selectedTags.contains(id) { selectedTags.removeAll { $0 == id } } else { selectedTags.append(id) }
+                    }
+                }
+                entry["tagIds"] = selectedTags.sorted()
+            case "预算标记": entry["excludeFromBudget"] = try await choose(["计入预算", "不计入预算"], "仅影响预算，仍正常计支出") == "不计入预算"
+            default: return initial
+            }
+        }
+    }
+
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
+        .result(value: try await runEditor())
+    }
+
+    @MainActor func runEditor() async throws -> String {
+        let source = try ConfirmedBilling.decode(draft)
+        guard source["status"] as? String == "draft", let ledgerId = source["ledgerId"] as? Int else { throw ShortcutBillingError(message: "请先生成草稿") }
+        // Fresh references after recognition; no bridge call stays open while editing.
+        let options = try await ConfirmedBilling.call(["operation": "options", "ledgerId": ledgerId])
+        let categories = options["categories"] as? [[String: Any]] ?? []
+        let accounts = options["accounts"] as? [[String: Any]] ?? []
+        let tags = options["tags"] as? [[String: Any]] ?? []
+        let defaults = options["defaults"] as? [String: Any] ?? [:]
+        let candidates = source["candidates"] as? [[String: Any]] ?? []
+        var candidate: [String: Any]
+        if candidates.count > 1 {
+            let labels = candidates.enumerated().map { String($0.offset + 1) + ". " + ConfirmedBilling.money($0.element["amountMinor"] as? Int ?? 0) + " " + ($0.element["merchant"] as? String ?? "") }
+            let selected = try await choose(labels + ["人工填写", "取消"], "识别到多个候选，请只选择本次付款")
+            if selected == "取消" { throw ShortcutBillingError(message: "已取消，未入账") }
+            candidate = labels.firstIndex(of: selected).map { candidates[$0] } ?? [:]
+        } else { candidate = candidates.first ?? [:] }
+        if candidate["blocked"] as? Bool == true {
+            let action = try await choose(["核对后人工填写支出", "取消"], "识别到非支出或币种冲突，不可直接提交")
+            if action == "取消" { throw ShortcutBillingError(message: "已取消，未入账") }
+            candidate = [:]
+        }
+        if let warnings = candidate["warnings"] as? [String], !warnings.isEmpty {
+            if try await choose(["继续核对", "取消"], warnings.joined(separator: "\n")) == "取消" { throw ShortcutBillingError(message: "已取消，未入账") }
+        }
+        var total = candidate["amountMinor"] as? Int ?? 0
+        while total <= 0 { total = (try? ConfirmedBilling.minor(await input("输入本次付款金额（元）"))) ?? 0 }
+        var accountId = candidate["accountId"] as? Int ?? defaults["accountId"] as? Int
+        if !accounts.contains(where: { $0["id"] as? Int == accountId }) { accountId = try await pick(accounts, "选择付款账户") }
+        var time = candidate["occurredAt"] as? String ?? ISO8601DateFormatter().string(from: Date())
+        var entries: [[String: Any]] = [["amountMinor": total, "note": candidate["note"] as? String ?? "",
+            "tagIds": candidate["tagIds"] as? [Int] ?? defaults["tagIds"] as? [Int] ?? [],
+            "excludeFromBudget": candidate["excludeFromBudget"] as? Bool ?? defaults["excludeFromBudget"] as? Bool ?? false]]
+        if let categoryId = candidate["categoryId"] as? Int { entries[0]["categoryId"] = categoryId }
+        var didSplit = false
+        while true {
+            let used = entries.reduce(0) { $0 + ($1["amountMinor"] as? Int ?? 0) }
+            let summary = "付款 " + ConfirmedBilling.money(total) + " 元 · 账户 " + ConfirmedBilling.label(accountId, accounts) + "\n时间：" + time +
+                "\n剩余：" + ConfirmedBilling.money(total - used) + "\n" + entries.enumerated().map { "第 " + String($0.offset + 1) + " 笔\n" + ConfirmedBilling.summary($0.element, categories: categories, tags: tags) }.joined(separator: "\n")
+            let action = try await choose(["确认提交", "编辑明细", "拆分或新增明细", "删除明细", "修改原付款金额", "付款账户", "日期时间", "取消整次记账"], summary)
+            switch action {
+            case "取消整次记账": throw ShortcutBillingError(message: "已取消，未入账")
+            case "付款账户": accountId = try await pick(accounts, "选择付款账户")
+            case "日期时间":
+                let value = try await input("当前 " + time + "；输入完整日期时间，如 2026-11-05T18:30:00+08:00")
+                if ISO8601DateFormatter().date(from: value) != nil { time = value }
+            case "修改原付款金额":
+                if let amount = try? ConfirmedBilling.minor(await input("输入原付款总额")) { total = amount; if !didSplit && entries.count == 1 { entries[0]["amountMinor"] = amount } }
+            case "拆分或新增明细":
+                if !didSplit {
+                    if try await choose(["开始拆分", "返回"], "原整笔草稿将替换为逐笔明细，暂不入账") == "返回" { continue }
+                    entries = []; didSplit = true
+                }
+                guard entries.count < 100 else { continue }
+                let remaining = total - entries.reduce(0) { $0 + ($1["amountMinor"] as? Int ?? 0) }
+                guard remaining > 0 else { continue }
+                var entry: [String: Any] = ["amountMinor": remaining, "note": candidate["note"] as? String ?? "", "tagIds": candidate["tagIds"] as? [Int] ?? [], "excludeFromBudget": candidate["excludeFromBudget"] as? Bool ?? false]
+                entry = try await edit(entry, categories: categories, tags: tags)
+                if (entry["amountMinor"] as? Int ?? 0) <= remaining && entry["categoryId"] is Int { entries.append(entry) }
+            case "编辑明细", "删除明细":
+                guard !entries.isEmpty else { continue }
+                let labels = entries.enumerated().map { "第 " + String($0.offset + 1) + " 笔 " + ConfirmedBilling.money($0.element["amountMinor"] as? Int ?? 0) }
+                let selected = try await choose(labels + ["返回"], "选择明细")
+                guard let index = labels.firstIndex(of: selected) else { continue }
+                if action == "删除明细" { entries.remove(at: index); didSplit = true }
+                else { entries[index] = try await edit(entries[index], categories: categories, tags: tags) }
+            case "确认提交":
+                guard !entries.isEmpty, used == total, entries.allSatisfy({ entry in
+                    (entry["amountMinor"] as? Int ?? 0) > 0 && categories.contains { $0["id"] as? Int == entry["categoryId"] as? Int }
+                }) else { _ = try await choose(["返回修改"], "金额尚未分配完、超额或分类未选择，不能提交"); continue }
+                let submission: [String: Any] = ["schemaVersion": 1, "confirmed": true, "requestId": source["requestId"] as? String ?? UUID().uuidString,
+                    "ledgerId": ledgerId, "accountId": accountId!, "type": "expense", "occurredAt": time,
+                    "originalAmountMinor": total, "entries": entries]
+                return try ConfirmedBilling.encode(submission)
+            default: break
+            }
+        }
+    }
+}
+
+@available(iOS 16.0, *)
+struct RecognizeConfirmBillingIntent: AppIntent {
+    static var title: LocalizedStringResource = "识别并确认记账"
+    static var description: LocalizedStringResource = "图片或本地 OCR 识别，系统菜单编辑和拆分，最终一次确认直接入账。"
+    static var openAppWhenRun = false
+    @Parameter(title: "图片") var image: IntentFile
+    @Parameter(title: "使用本地 OCR 后文字 AI", default: false) var useOCR: Bool
+    @Parameter(title: "默认配置 JSON") var configuration: String?
+    @Parameter(title: "菜单") var choice: String?
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+        // Consent before any network request. No automatic image fallback.
+        let privacy = useOCR ? "在本机取字，仅将文字发送给 App 配置的文字 AI 服务。" : "图片将发送给 App 配置的视觉 AI 服务。"
+        if try await $choice.requestDisambiguation(among: ["继续识别", "取消"], dialog: IntentDialog(stringLiteral: privacy)) == "取消" { throw ShortcutBillingError(message: "已取消，未入账") }
+        var draft: [String: Any]
+        do { draft = try await ConfirmedBilling.recognizeImage(image, ocr: useOCR, configuration: configuration) }
+        catch {
+            if try await $choice.requestDisambiguation(among: ["人工填写", "取消"], dialog: "识别未完成，未入账。可人工填写；不会自动上传原图。") == "取消" { throw error }
+            let defaults = try configuration.map(ConfirmedBilling.decode) ?? [:]
+            let options = try await ConfirmedBilling.call(defaults.merging(["operation": "options"]) { _, new in new })
+            draft = ["status": "draft", "requestId": UUID().uuidString, "ledgerId": options["ledgerId"]!, "candidates": []]
+        }
+        var editor = EditBillingDraftIntent()
+        editor.draft = try ConfirmedBilling.encode(draft)
+        let edited = try await editor.runEditor()
+        let result = try await ConfirmedBilling.commit(ConfirmedBilling.decode(edited))
+        let object = try ConfirmedBilling.decode(result)
+        let message = "已入账 " + String(object["count"] as? Int ?? 0) + " 条，合计 " + ConfirmedBilling.money(object["totalAmountMinor"] as? Int ?? 0) + " 元。云端尚未确认，请查看 App 同步状态，无需重记。"
+        return .result(value: result, dialog: IntentDialog(stringLiteral: message))
     }
 }
 #endif

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'shortcut_tables.dart';
 import 'dart:ui' show Locale;
 
 import 'package:drift/drift.dart';
@@ -511,7 +512,7 @@ class BeeDatabase extends _$BeeDatabase {
   BeeDatabase.forTesting(QueryExecutor executor) : super(executor);
 
   @override
-  int get schemaVersion => 33; // v33: Agent 本地记忆、摘要与审计表
+  int get schemaVersion => 34; // v34: 快捷记账本地规则、拆分组、提交凭证
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -1258,9 +1259,13 @@ class BeeDatabase extends _$BeeDatabase {
             await _createAgentMemoryFtsTable();
             logger.info('DBMigration', 'v33 迁移完成');
           }
+          if (from < 34) {
+            for (final sql in shortcutTablesSql) { await customStatement(sql); }
+          }
         },
         onCreate: (m) async {
           await m.createAll();
+          for (final sql in shortcutTablesSql) { await customStatement(sql); }
           await customStatement(
               'CREATE UNIQUE INDEX IF NOT EXISTS idx_rate_override_pair '
               'ON exchange_rate_overrides (base_currency, quote_currency);');

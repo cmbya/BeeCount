@@ -1,0 +1,47 @@
+name: iOS Shortcut Billing
+
+on:
+  push:
+    branches: [main]
+    paths: ["ios/**", "lib/**", "test/services/shortcut*", ".github/workflows/shortcut-ios.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.27.3"
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Analyze shortcut changes
+        run: >-
+          flutter analyze --no-pub --no-fatal-infos
+          lib/services/automation/shortcut_schema.dart
+          lib/services/automation/shortcut_store.dart
+          lib/services/automation/shortcut_service.dart
+          lib/pages/settings/shortcut_billing_page.dart
+          test/services/shortcut_billing_test.dart
+      - name: Verify transactions and idempotency
+        run: flutter test --no-pub test/services/shortcut_billing_test.dart
+      - name: Build unsigned iOS app
+        run: flutter build ios --release --no-codesign --build-name=3.9.0 --build-number=$GITHUB_RUN_NUMBER
+      - name: Package unsigned IPA for personal signing
+        run: |
+          mkdir -p build/shortcut-package/Payload
+          cp -R build/ios/iphoneos/Runner.app build/shortcut-package/Payload/
+          cd build/shortcut-package
+          zip -qr BeeCount-shortcut-unsigned.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BeeCount-shortcut-unsigned
+          path: build/shortcut-package/BeeCount-shortcut-unsigned.ipa
+          retention-days: 14
+

@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../data/repositories/base_repository.dart';
 import '../../providers/database_providers.dart';
 import '../automation/auto_billing_service.dart';
+import '../automation/shortcut_service.dart';
 import '../billing/post_processor.dart';
 import '../system/logger_service.dart';
 import '../../l10n/app_localizations.dart';
@@ -208,7 +209,7 @@ class AppLinkService {
     _appIntentSubscription = _eventChannel.receiveBroadcastStream().listen(
       (event) {
         if (event is String) {
-          logger.info('AppLink', '收到 AppIntent 事件: $event');
+          logger.info('AppLink', '收到 AppIntent 事件');
           _handleAppIntent(event);
         }
       },
@@ -229,7 +230,12 @@ class AppLinkService {
 
       logger.info('AppLink', 'AppIntent action: $action');
 
-      if (action == 'auto-billing') {
+      if (action == 'shortcut-request') {
+        final result = await ShortcutService(_container).handle(data);
+        await _methodChannel.invokeMethod('shortcutReply', {
+          'callId': data['callId'], 'response': jsonEncode(result),
+        });
+      } else if (action == 'auto-billing') {
         final imagePath = data['imagePath'] as String?;
         if (imagePath != null && imagePath.isNotEmpty) {
           logger.info('AppLink', '处理快捷指令图片: $imagePath');

@@ -13,6 +13,41 @@ class AppIntentsBridge: NSObject, FlutterPlugin {
     private static var pendingEvents: [String] = []
     private static let maxPendingEvents = 5
 
+    // New protocol: register before dispatch, match only the individual call,
+    // and remove its timer/cache on reply. Legacy completion signals are isolated.
+    private static var shortcutWaiters: [String: (String) -> Void] = [:]
+    private static var shortcutTimers: [String: DispatchWorkItem] = [:]
+
+    @MainActor
+    static func request(_ payload: [String: Any], timeout: TimeInterval = 20) async throws -> String {
+        let callId = UUID().uuidString
+        var event = payload
+        event["action"] = "shortcut-request"
+        event["callId"] = callId
+        let data = try JSONSerialization.data(withJSONObject: event)
+        return await withCheckedContinuation { continuation in
+            shortcutWaiters[callId] = { continuation.resume(returning: $0) }
+            let timer = DispatchWorkItem {
+                let reply = "{\"status\":\"error\",\"code\":\"RESULT_UNKNOWN\",\"message\":\"请求超时；提交可能已完成，请查询原请求，勿重新记账\"}"
+                finishShortcut(callId: callId, response: reply)
+            }
+            shortcutTimers[callId] = timer
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: timer)
+            sendEvent(String(decoding: data, as: UTF8.self))
+        }
+    }
+
+    private static func finishShortcut(callId: String, response: String) {
+        shortcutTimers.removeValue(forKey: callId)?.cancel()
+        let waiter = shortcutWaiters.removeValue(forKey: callId)
+        pendingEvents.removeAll { event in
+            guard let data = event.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            return object["callId"] as? String == callId
+        }
+        waiter?(response)
+    }
+
     // openAppWhenRun=false 时,perform() 把事件丢给 Flutter 后必须**等 Flutter
     // 处理完**再返回。否则 iOS 认为 AppIntent 已结束,会很快 kill 进程,导致
     // 「正在识别」通知出来了但「成功」通知发不出去。
@@ -41,6 +76,13 @@ class AppIntentsBridge: NSObject, FlutterPlugin {
 
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
+        case "shortcutReply":
+            if let args = call.arguments as? [String: Any],
+               let callId = args["callId"] as? String,
+               let response = args["response"] as? String {
+                AppIntentsBridge.finishShortcut(callId: callId, response: response)
+            }
+            result(nil)
         case "isSupported":
             // 检查是否支持AppIntents（iOS 16+）
             if #available(iOS 16.0, *) {
@@ -66,14 +108,19 @@ class AppIntentsBridge: NSObject, FlutterPlugin {
             if let sink = eventSink {
                 // 如果已连接，立即发送
                 sink(event)
-                print("[AppIntentsBridge] ✅ 事件已发送: \(event)")
+                print("[AppIntentsBridge] event dispatched")
             } else {
                 // 如果未连接，缓存事件（解决冷启动时序问题）
                 pendingEvents.append(event)
                 if pendingEvents.count > maxPendingEvents {
-                    pendingEvents.removeFirst()
+                    let removed = pendingEvents.removeFirst()
+                    if let data = removed.data(using: .utf8),
+                       let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let callId = object["callId"] as? String {
+                        finishShortcut(callId: callId, response: "{\"status\":\"error\",\"code\":\"BUSY\",\"message\":\"请求过多，请稍后重试\"}")
+                    }
                 }
-                print("[AppIntentsBridge] 📦 事件已缓存（共\(pendingEvents.count)个）: \(event)")
+                print("[AppIntentsBridge] event queued")
             }
         }
     }
@@ -117,7 +164,7 @@ extension AppIntentsBridge: FlutterStreamHandler {
         DispatchQueue.main.async {
             for event in AppIntentsBridge.pendingEvents {
                 events(event)
-                print("[AppIntentsBridge] 📤 发送缓存事件: \(event)")
+                print("[AppIntentsBridge] queued event dispatched")
             }
             if !AppIntentsBridge.pendingEvents.isEmpty {
                 print("[AppIntentsBridge] ✅ 已发送 \(AppIntentsBridge.pendingEvents.count) 个缓存事件")
