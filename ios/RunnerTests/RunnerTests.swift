@@ -56,7 +56,7 @@ class RunnerTests: XCTestCase {
     XCTAssertTrue(choices.isEmpty)
   }
 
-  @available(iOS 16.0, *)
+  @available(iOS 17.0, *)
   func testOnlyUserFacingBillingActionsAreDiscoverable() {
     XCTAssertFalse(BillingOptionsIntent.isDiscoverable)
     XCTAssertFalse(ImageBillingDraftIntent.isDiscoverable)

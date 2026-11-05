@@ -62,6 +62,8 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>蜜蜂记账需要连接您配置的局域网 AI 或同步服务。</string>
 	<!-- Query URL Schemes - Required for opening other apps -->
 	<key>LSApplicationQueriesSchemes</key>
 	<array>

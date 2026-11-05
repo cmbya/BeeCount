@@ -646,7 +646,7 @@ struct BillingLedgerQuery: EntityStringQuery {
     @MainActor func suggestedEntities() async throws -> [BillingLedger] {
         let options = try await ConfirmedBilling.call(["operation": "options"])
         var rows = options["ledgers"] as? [[String: Any]] ?? []
-        
+
         return rows.compactMap { row in
             guard let id = row["id"] as? Int, let name = row["name"] as? String else { return nil }
             return BillingLedger(id: id, name: name)
@@ -735,7 +735,7 @@ struct BillingTagQuery: EntityStringQuery {
     @MainActor func suggestedEntities() async throws -> [BillingTag] {
         let options = try await ConfirmedBilling.call(["operation": "options"])
         var rows = options["tags"] as? [[String: Any]] ?? []
-        
+
         return rows.compactMap { row in
             guard let id = row["id"] as? Int, let name = row["name"] as? String else { return nil }
             return BillingTag(id: id, name: name)
