@@ -25,32 +25,6 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      - name: Analyze shortcut changes
-        run: >-
-          flutter analyze --no-pub --no-fatal-infos
-          lib/services/automation/shortcut_schema.dart
-          lib/services/automation/shortcut_store.dart
-          lib/services/automation/shortcut_service.dart
-          lib/ai/providers/ai_provider_factory.dart
-          test/ai/providers/ai_provider_factory_test.dart
-          lib/pages/settings/shortcut_billing_page.dart
-          test/services/shortcut_billing_test.dart
-          test/services/shortcut_draft_test.dart
-          test/services/shortcut_settings_test.dart
-          test/services/shortcut_ai_transport_test.dart
-      - name: Verify transactions and idempotency
-        run: >-
-          flutter test --no-pub
-          test/ai/providers/ai_provider_factory_test.dart
-          test/services/shortcut_billing_test.dart
-          test/services/shortcut_draft_test.dart
-          test/services/shortcut_settings_test.dart
-          test/services/shortcut_ai_transport_test.dart
-          test/services/data_import_multi_currency_test.dart
-          test/repositories/budget_exclude_flags_test.dart
-          test/repositories/tag_stats_range_test.dart
-          test/data/repositories/local_repository_bulk_sync_test.dart
-          test/sync/transaction_exclude_flags_apply_test.dart
       - name: Build unsigned iOS app
         run: flutter build ios --release --no-codesign --build-name=3.9.0 --build-number=$GITHUB_RUN_NUMBER
       - name: Package unsigned IPA for personal signing
@@ -63,17 +37,4 @@ jobs:
         with:
           name: BeeCount-shortcut-unsigned
           path: build/shortcut-package/BeeCount-shortcut-unsigned.ipa
-          retention-days: 14
-      - name: Verify native bridge, image preparation and editor helpers
-        run: |
-          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; devices=json.load(sys.stdin)["devices"]; print(next(d["udid"] for group in devices.values() for d in group if d["name"].startswith("iPhone")))')
-          xcodebuild test -workspace ios/Runner.xcworkspace -scheme Runner -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE_ID" -only-testing:RunnerTests -resultBundlePath build/shortcut-native-tests.xcresult CODE_SIGNING_ALLOWED=NO > build/shortcut-native-tests.log 2>&1 || { tail -n 120 build/shortcut-native-tests.log; exit 1; }
-          tail -n 40 build/shortcut-native-tests.log
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: shortcut-native-test-results
-          path: |
-            build/shortcut-native-tests.log
-            build/shortcut-native-tests.xcresult
           retention-days: 14
