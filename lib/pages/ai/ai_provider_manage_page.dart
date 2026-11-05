@@ -662,11 +662,11 @@ class _AIProviderEditPageState extends ConsumerState<AIProviderEditPage> {
       id: widget.provider?.id ?? 'test',
       name: _nameController.text,
       isBuiltIn: _isBuiltIn,
-      apiKey: _apiKeyController.text,
-      baseUrl: _baseUrlController.text,
-      textModel: _textModelController.text,
-      visionModel: _visionModelController.text,
-      audioModel: _audioModelController.text,
+      apiKey: _apiKeyController.text.trim(),
+      baseUrl: _baseUrlController.text.trim(),
+      textModel: _textModelController.text.trim(),
+      visionModel: _visionModelController.text.trim(),
+      audioModel: _audioModelController.text.trim(),
       createdAt: widget.provider?.createdAt ?? DateTime.now(),
     );
   }

@@ -27,6 +27,8 @@ jobs:
           lib/services/automation/shortcut_schema.dart
           lib/services/automation/shortcut_store.dart
           lib/services/automation/shortcut_service.dart
+          lib/ai/providers/ai_provider_factory.dart
+          test/ai/providers/ai_provider_factory_test.dart
           lib/pages/settings/shortcut_billing_page.dart
           test/services/shortcut_billing_test.dart
           test/services/shortcut_draft_test.dart
@@ -35,6 +37,7 @@ jobs:
       - name: Verify transactions and idempotency
         run: >-
           flutter test --no-pub
+          test/ai/providers/ai_provider_factory_test.dart
           test/services/shortcut_billing_test.dart
           test/services/shortcut_draft_test.dart
           test/services/shortcut_settings_test.dart

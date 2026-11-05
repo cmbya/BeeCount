@@ -16,6 +16,26 @@ import 'package:beecount/ai/providers/ai_provider_factory.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   SharedPreferences.setMockInitialValues({});
+  test('custom API endpoint preserves port and v1 prefix', () {
+    expect(
+        AIProviderFactory.normalizeBaseUrl(
+            ' https://cpa.cmby.dpdns.org:14785/v1/ '),
+        'https://cpa.cmby.dpdns.org:14785/v1');
+    expect(
+        AIProviderFactory.normalizeBaseUrl(
+            'https://example.com/v1/chat/completions'),
+        'https://example.com/v1');
+    expect(() => AIProviderFactory.normalizeBaseUrl('example.com/v1'),
+        throwsA(isA<AIException>()));
+    final error = DioException(
+        requestOptions: RequestOptions(
+            path: 'https://example.com:14785/v1/chat/completions'),
+        type: DioExceptionType.connectionError);
+    expect(AIProviderFactory.userFacingError(error),
+        contains('example.com:14785'));
+    expect(
+        AIProviderFactory.userFacingError(error), isNot(contains('test-key')));
+  });
 
   group('AIProviderFactory.rejectedChatParam', () {
     const moonshotTempErr =

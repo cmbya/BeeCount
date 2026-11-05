@@ -386,7 +386,7 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                 const Divider(height: 32),
                 const Text('快捷指令配置'),
                 const SelectableText(
-                    '截图 → 图片生成记账草稿（或本地取字 → 文字生成记账草稿）→ 确认编辑记账草稿 → 提交已确认账单。也可以用“识别并确认记账”组合动作。\n图片模式将图片发送给 App 中配置的视觉服务；OCR 模式只发送文字给文字服务，仍可能联网。失败不会自动切换为上传图片。'),
+                    '截图 → 识别并确认记账。只需这一个记账动作，运行后直接点金额、分类、账户等行修改，最后确认提交。手动或自建识别流程可用“自定义支出账单 / 自定义收入账单 / 自定义转账账单”，直接填写字段或接入变量，无需 JSON。图片模式将图片发送给视觉服务；OCR 模式只发送文字，仍可能联网。'),
                 const SizedBox(height: 16),
                 const Text('最近提交凭证（点击复制请求 ID）'),
                 const Text(

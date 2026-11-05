@@ -29,6 +29,7 @@ void main() {
       final requests = <Map<String, dynamic>>[];
       var fail = false;
       server.listen((request) async {
+        expect(request.uri.path, '/v1/chat/completions');
         requests.add(jsonDecode(await utf8.decoder.bind(request).join())
             as Map<String, dynamic>);
         request.response.headers.contentType = ContentType.json;
@@ -62,7 +63,7 @@ void main() {
             id: 'local-test',
             name: 'local-test',
             apiKey: 'test-only',
-            baseUrl: 'http://127.0.0.1:' + server.port.toString(),
+            baseUrl: ' http://127.0.0.1:' + server.port.toString() + '/v1/ ',
             textModel: 'text-test',
             visionModel: 'vision-test',
             createdAt: DateTime(2026));

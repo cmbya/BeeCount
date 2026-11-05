@@ -20,20 +20,43 @@ import '../../services/system/logger_service.dart';
 class AIProviderFactory {
   AIProviderFactory._();
 
-  static Dio? _dio;
+  /// Preserve custom ports and API prefixes; accept a copied completion URL.
+  @visibleForTesting
+  static String normalizeBaseUrl(String value) {
+    var normalized = value.trim().replaceAll(RegExp(r'/+$'), '');
+    for (final suffix in [
+      '/chat/completions',
+      '/models',
+      '/audio/transcriptions'
+    ]) {
+      if (normalized.endsWith(suffix)) {
+        normalized = normalized.substring(0, normalized.length - suffix.length);
+        break;
+      }
+    }
+    final uri = Uri.tryParse(normalized);
+    if (uri == null ||
+        !['https', 'http'].contains(uri.scheme) ||
+        uri.host.isEmpty ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasQuery ||
+        uri.hasFragment) {
+      throw AIException('接口地址无效，请填写完整的 http:// 或 https:// API 根地址');
+    }
+    return normalized;
+  }
 
-  /// 获取/创建 Dio 实例
+  /// Each request owns its configuration, including concurrent capability tests.
   static Dio _getDio(AIServiceProviderConfig config) {
-    _dio ??= Dio(BaseOptions(
+    return Dio(BaseOptions(
+      baseUrl: normalizeBaseUrl(config.baseUrl),
       connectTimeout: const Duration(seconds: 60),
       receiveTimeout: const Duration(seconds: 60),
+      headers: {
+        'Authorization': 'Bearer ${config.apiKey.trim()}',
+        'Content-Type': 'application/json',
+      },
     ));
-    _dio!.options.baseUrl = config.baseUrl;
-    _dio!.options.headers = {
-      'Authorization': 'Bearer ${config.apiKey}',
-      'Content-Type': 'application/json',
-    };
-    return _dio!;
   }
 
   // ============================================================
@@ -60,7 +83,8 @@ class AIProviderFactory {
     );
 
     if (config == null || !config.isValid) {
-      throw AIException(resolveAppLocalizations(null).aiProviderNotConfiguredText);
+      throw AIException(
+          resolveAppLocalizations(null).aiProviderNotConfiguredText);
     }
 
     if (!config.supportsText) {
@@ -89,7 +113,8 @@ class AIProviderFactory {
       AICapabilityType.text,
     );
     if (config == null || !config.isValid || !config.supportsText) {
-      throw AIException(resolveAppLocalizations(null).aiProviderNotConfiguredTextUsable);
+      throw AIException(
+          resolveAppLocalizations(null).aiProviderNotConfiguredTextUsable);
     }
     logger.debug(logTag ?? 'AgentNativeTools',
         '发起原生工具流式对话 (${config.name}, 模型: ${config.textModel})');
@@ -370,7 +395,7 @@ class AIProviderFactory {
     } else if (error is OpenAIException) {
       detail = error.userMessage;
     } else if (error is DioException) {
-      detail = OpenAIException.fromDioException(error).userMessage;
+      detail = _extractDioError(error);
     } else {
       detail = '服务商返回了无法识别的响应，请检查模型名称和接口兼容性';
     }
@@ -445,7 +470,8 @@ class AIProviderFactory {
     );
 
     if (config == null || !config.isValid) {
-      throw AIException(resolveAppLocalizations(null).aiProviderNotConfiguredVision);
+      throw AIException(
+          resolveAppLocalizations(null).aiProviderNotConfiguredVision);
     }
 
     if (!config.supportsVision) {
@@ -477,7 +503,8 @@ class AIProviderFactory {
     );
 
     if (config == null || !config.isValid) {
-      throw AIException(resolveAppLocalizations(null).aiProviderNotConfiguredSpeech);
+      throw AIException(
+          resolveAppLocalizations(null).aiProviderNotConfiguredSpeech);
     }
 
     if (!config.supportsSpeech) {
@@ -1222,6 +1249,17 @@ class AIProviderFactory {
       logger.warning(tag, '  底层错误: ${e.error}');
     }
 
+    final endpoint = e.requestOptions.uri;
+    final host =
+        endpoint.hasPort ? '${endpoint.host}:${endpoint.port}' : endpoint.host;
+    if (e.error is HandshakeException ||
+        e.type == DioExceptionType.badCertificate) {
+      return 'HTTPS 握手或证书验证失败（$host）。请检查服务端证书、证书链、TLS 和反向代理配置；尚未完成密钥验证。';
+    }
+    if (e.type == DioExceptionType.connectionError ||
+        e.error is SocketException) {
+      return '无法连接 $host：连接被拒绝、重置或域名不可达。请检查服务端监听端口、HTTPS 配置及手机网络；尚未收到服务端 HTTP 响应。';
+    }
     return OpenAIException.fromDioException(e).userMessage;
   }
 }

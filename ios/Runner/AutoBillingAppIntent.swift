@@ -66,6 +66,7 @@ struct ShortcutBillingImages {
 /// 通知」,可手动改用相册记账兜底。
 @available(iOS 16.0, *)
 struct AutoBillingAppIntent: AppIntent {
+    static var isDiscoverable: Bool = false
     static var title: LocalizedStringResource = "截图自动记账"
     static var description: LocalizedStringResource = "自动识别截图中的支付信息并创建账单"
     static var openAppWhenRun: Bool = false
@@ -149,7 +150,7 @@ struct AutoBillingAppIntent: AppIntent {
 struct AutoBillingShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
-            intent: AutoBillingAppIntent(),
+            intent: RecognizeConfirmBillingIntent(),
             phrases: [
                 "在\(.applicationName)中截图记账",
                 "用\(.applicationName)记账",
@@ -279,6 +280,7 @@ enum ConfirmedBilling {
 
 @available(iOS 16.0, *)
 struct BillingOptionsIntent: AppIntent {
+    static var isDiscoverable: Bool = false
     static var title: LocalizedStringResource = "获取快捷记账选项"
     static var openAppWhenRun = false
     @Parameter(title: "账本 ID") var ledgerId: Int?
@@ -292,6 +294,7 @@ struct BillingOptionsIntent: AppIntent {
 
 @available(iOS 16.0, *)
 struct ImageBillingDraftIntent: AppIntent {
+    static var isDiscoverable: Bool = false
     static var title: LocalizedStringResource = "图片生成记账草稿"
     static var description: LocalizedStringResource = "仅识别，不入账。图片将发送给 App 配置的视觉服务。"
     static var openAppWhenRun = false
@@ -304,6 +307,7 @@ struct ImageBillingDraftIntent: AppIntent {
 
 @available(iOS 16.0, *)
 struct TextBillingDraftIntent: AppIntent {
+    static var isDiscoverable: Bool = false
     static var title: LocalizedStringResource = "文字生成记账草稿"
     static var description: LocalizedStringResource = "仅识别，不入账。只发送文字给 App 配置的文字服务，不发送原图。"
     static var openAppWhenRun = false
@@ -318,6 +322,7 @@ struct TextBillingDraftIntent: AppIntent {
 
 @available(iOS 16.0, *)
 struct CommitConfirmedBillingIntent: AppIntent {
+    static var isDiscoverable: Bool = false
     static var title: LocalizedStringResource = "提交已确认账单"
     static var openAppWhenRun = false
     @Parameter(title: "已确认账单 JSON") var submission: String
@@ -328,6 +333,7 @@ struct CommitConfirmedBillingIntent: AppIntent {
 
 @available(iOS 16.0, *)
 struct QueryConfirmedBillingIntent: AppIntent {
+    static var isDiscoverable: Bool = false
     static var title: LocalizedStringResource = "查询快捷记账结果"
     static var openAppWhenRun = false
     @Parameter(title: "请求 ID（留空查最近一次）") var requestId: String?
@@ -340,6 +346,7 @@ struct QueryConfirmedBillingIntent: AppIntent {
 
 @available(iOS 16.0, *)
 struct EditBillingDraftIntent: AppIntent {
+    static var isDiscoverable: Bool = false
     static var title: LocalizedStringResource = "确认编辑记账草稿"
     static var description: LocalizedStringResource = "系统菜单编辑、逐笔拆分并最终确认。此动作本身不入账。"
     static var openAppWhenRun = false
@@ -383,11 +390,22 @@ final class ConfirmedBillingEditor {
         guard let index = labels.firstIndex(of: selected), let id = values[index]["id"] as? Int else { throw ShortcutBillingError(message: "选项已失效") }
         return id
     }
+    private func fields(_ actions: [String], title: String, values: [String: String]) async throws -> String {
+        let labels = actions.map { action in values[action].map { action + "：" + $0 } ?? action }
+        let selected = try await choose(labels, title)
+        return labels.firstIndex(of: selected).map { actions[$0] } ?? selected
+    }
     @MainActor private func edit(_ initial: [String: Any], categories: [[String: Any]], tags: [[String: Any]], digits: Int, type: String, maximum: Int? = nil) async throws -> [String: Any] {
         var entry = initial
         while true {
             let fields = ["完成此笔", "金额"] + (type == "transfer" ? [] : ["分类"]) + ["备注", "标签"] + (type == "expense" ? ["预算标记"] : []) + ["取消本次字段修改"]
-            let selected = try await choose(fields, ConfirmedBilling.summary(entry, categories: categories, tags: tags, digits: digits, type: type))
+            let selected = try await self.fields(fields, title: "编辑账单明细", values: [
+                "金额": ConfirmedBilling.money(entry["amountMinor"] as? Int ?? 0, digits: digits),
+                "分类": ConfirmedBilling.label(entry["categoryId"] as? Int, categories),
+                "备注": entry["note"] as? String ?? "",
+                "标签": (entry["tagIds"] as? [Int] ?? []).map { ConfirmedBilling.label($0, tags) }.joined(separator: "、"),
+                "预算标记": entry["excludeFromBudget"] as? Bool == true ? "不计入预算" : "计入预算"
+            ])
             switch selected {
             case "完成此笔":
                 if let maximum, (entry["amountMinor"] as? Int ?? 0) > maximum {
@@ -469,8 +487,8 @@ final class ConfirmedBillingEditor {
         }
         var accountId = candidate["accountId"] as? Int ?? defaults["accountId"] as? Int
         if !accounts.contains(where: { $0["id"] as? Int == accountId }) { accountId = try await pick(accounts, "选择付款账户") }
-        var toAccountId: Int?
-        if type == "transfer" { toAccountId = try await pick(accounts.filter { $0["id"] as? Int != accountId }, "选择转入账户") }
+        var toAccountId = candidate["toAccountId"] as? Int
+        if type == "transfer" && !accounts.contains(where: { $0["id"] as? Int == toAccountId && toAccountId != accountId }) { toAccountId = try await pick(accounts.filter { $0["id"] as? Int != accountId }, "选择转入账户") }
         var time = candidate["occurredAt"] as? String ?? ISO8601DateFormatter().string(from: Date())
         var entries: [[String: Any]] = [["amountMinor": total, "note": candidate["note"] as? String ?? "",
             "tagIds": candidate["tagIds"] as? [Int] ?? defaults["tagIds"] as? [Int] ?? [],
@@ -485,9 +503,40 @@ final class ConfirmedBillingEditor {
             let ledgerName = ConfirmedBilling.label(ledgerId, options["ledgers"] as? [[String: Any]] ?? [])
             let accountSummary = ConfirmedBilling.label(accountId, accounts) + (type == "transfer" ? " → " + ConfirmedBilling.label(toAccountId, accounts) : "")
             let summary = typeName(type) + " " + ConfirmedBilling.money(total, digits: digits) + " " + currency + " · 账本 " + ledgerName + " · 账户 " + accountSummary + "\n时间：" + time + "\n剩余：" + ConfirmedBilling.money(max(0, total - used), digits: digits) + excess + "\n" + detail
-            let actions = ["确认提交", "编辑明细"] + (type == "expense" ? ["拆分或新增明细", "删除明细"] : []) + ["修改原付款金额", "记账账户"] + (type == "transfer" ? ["转入账户"] : []) + ["账本", "收支类型", "日期时间", "刷新有效选项", "取消整次记账"]
-            let action = try await choose(actions, summary)
+            let single = entries.count == 1 && !didSplit
+            let entry = entries.first ?? [:]
+            let tagNames = (entry["tagIds"] as? [Int] ?? []).map { ConfirmedBilling.label($0, tags) }.joined(separator: "、")
+            let directFields = single ? ["金额"] + (type == "transfer" ? [] : ["分类"]) + ["账户", "时间", "备注", "标签"] + (type == "expense" ? ["不计预算"] : []) : ["编辑明细", "删除明细", "修改原付款金额", "记账账户", "日期时间"]
+            let actions = directFields + (type == "transfer" ? ["转入账户"] : []) + (type == "expense" ? ["拆分或新增明细"] : []) + ["账本", "收支类型", "确认提交", "取消提交", "刷新有效选项"]
+            let selected = try await fields(actions, title: single ? "确认" + typeName(type) + "信息" : summary, values: [
+                "金额": ConfirmedBilling.money(total, digits: digits), "分类": ConfirmedBilling.label(entry["categoryId"] as? Int, categories),
+                "账户": ConfirmedBilling.label(accountId, accounts), "转入账户": ConfirmedBilling.label(toAccountId, accounts),
+                "时间": time, "备注": entry["note"] as? String ?? "", "标签": tagNames.isEmpty ? "无" : tagNames,
+                "不计预算": entry["excludeFromBudget"] as? Bool == true ? "不计入预算" : "计入预算",
+                "账本": ledgerName, "收支类型": typeName(type)
+            ])
+            let action = ["金额": "修改原付款金额", "账户": "记账账户", "时间": "日期时间", "取消提交": "取消整次记账"][selected] ?? selected
             switch action {
+            case "分类": entries[0]["categoryId"] = try await pick(categories, "选择分类")
+            case "备注":
+                let old = entries[0]["note"] as? String ?? ""
+                let operation = (try? await choose(["编辑", "追加", "清空重填", "保存空备注", "取消修改"], "原备注：" + old)) ?? "取消修改"
+                var value: String?
+                if operation != "保存空备注" && operation != "取消修改" { value = try? await input("输入备注；原备注：" + old) }
+                entries[0]["note"] = ConfirmedBilling.updatedNote(old, action: operation, value: value)
+            case "标签":
+                var ids = entries[0]["tagIds"] as? [Int] ?? []
+                while true {
+                    let labels = tags.map { (ids.contains($0["id"] as? Int ?? -1) ? "✓ " : "○ ") + ($0["name"] as? String ?? "") + " [" + String($0["id"] as? Int ?? -1) + "]" }
+                    let value = try await choose(["完成标签选择", "清空所有标签"] + labels, "选择标签")
+                    if value == "完成标签选择" { break }
+                    if value == "清空所有标签" { ids = []; continue }
+                    if let index = labels.firstIndex(of: value), let id = tags[index]["id"] as? Int {
+                        if ids.contains(id) { ids.removeAll { $0 == id } } else { ids.append(id) }
+                    }
+                }
+                entries[0]["tagIds"] = ids.sorted()
+            case "不计预算": entries[0]["excludeFromBudget"] = try await choose(["计入预算", "不计入预算"], "是否计入预算") == "不计入预算"
             case "取消整次记账": throw ShortcutBillingError(message: "已取消，未入账")
             case "记账账户":
                 accountId = try await pick(accounts, type == "income" ? "选择收款账户" : "选择付款或转出账户")
@@ -583,6 +632,234 @@ final class ConfirmedBillingEditor {
     }
 }
 
+
+@available(iOS 16.0, *)
+struct BillingLedger: AppEntity {
+    static var typeDisplayRepresentation: TypeDisplayRepresentation = "账本"
+    static var defaultQuery = BillingLedgerQuery()
+    var id: Int
+    var name: String
+    var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(name)") }
+}
+@available(iOS 16.0, *)
+struct BillingLedgerQuery: EntityStringQuery {
+    @MainActor func suggestedEntities() async throws -> [BillingLedger] {
+        let options = try await ConfirmedBilling.call(["operation": "options"])
+        var rows = options["ledgers"] as? [[String: Any]] ?? []
+        
+        return rows.compactMap { row in
+            guard let id = row["id"] as? Int, let name = row["name"] as? String else { return nil }
+            return BillingLedger(id: id, name: name)
+        }
+    }
+    @MainActor func entities(for identifiers: [Int]) async throws -> [BillingLedger] {
+        try await suggestedEntities().filter { identifiers.contains($0.id) }
+    }
+    @MainActor func entities(matching string: String) async throws -> [BillingLedger] {
+        try await suggestedEntities().filter { $0.name.localizedCaseInsensitiveContains(string) }
+    }
+}
+
+
+@available(iOS 16.0, *)
+struct BillingAccount: AppEntity {
+    static var typeDisplayRepresentation: TypeDisplayRepresentation = "账户"
+    static var defaultQuery = BillingAccountQuery()
+    var id: Int
+    var name: String
+    var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(name)") }
+}
+@available(iOS 16.0, *)
+struct BillingAccountQuery: EntityStringQuery {
+    @MainActor func suggestedEntities() async throws -> [BillingAccount] {
+        let options = try await ConfirmedBilling.call(["operation": "options"])
+        var rows = options["accounts"] as? [[String: Any]] ?? []
+        for ledger in options["ledgers"] as? [[String: Any]] ?? [] {
+            guard let id = ledger["id"] as? Int, id != options["ledgerId"] as? Int else { continue }
+            let other = try await ConfirmedBilling.call(["operation": "options", "ledgerId": id])
+            for account in other["accounts"] as? [[String: Any]] ?? [] where !rows.contains(where: { $0["id"] as? Int == account["id"] as? Int }) { rows.append(account) }
+        }
+        return rows.compactMap { row in
+            guard let id = row["id"] as? Int, let name = row["name"] as? String else { return nil }
+            return BillingAccount(id: id, name: name)
+        }
+    }
+    @MainActor func entities(for identifiers: [Int]) async throws -> [BillingAccount] {
+        try await suggestedEntities().filter { identifiers.contains($0.id) }
+    }
+    @MainActor func entities(matching string: String) async throws -> [BillingAccount] {
+        try await suggestedEntities().filter { $0.name.localizedCaseInsensitiveContains(string) }
+    }
+}
+
+
+@available(iOS 16.0, *)
+struct BillingCategory: AppEntity {
+    static var typeDisplayRepresentation: TypeDisplayRepresentation = "分类"
+    static var defaultQuery = BillingCategoryQuery()
+    var id: Int
+    var name: String
+    var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(name)") }
+}
+@available(iOS 16.0, *)
+struct BillingCategoryQuery: EntityStringQuery {
+    @MainActor func suggestedEntities() async throws -> [BillingCategory] {
+        let options = try await ConfirmedBilling.call(["operation": "options"])
+        var rows = options["categories"] as? [[String: Any]] ?? []
+        let income = try await ConfirmedBilling.call(["operation": "options", "type": "income"]); rows += income["categories"] as? [[String: Any]] ?? []
+        rows = rows.map { row in var row = row; row["name"] = (row["kind"] as? String == "income" ? "收入 · " : "支出 · ") + (row["name"] as? String ?? ""); return row }
+        return rows.compactMap { row in
+            guard let id = row["id"] as? Int, let name = row["name"] as? String else { return nil }
+            return BillingCategory(id: id, name: name)
+        }
+    }
+    @MainActor func entities(for identifiers: [Int]) async throws -> [BillingCategory] {
+        try await suggestedEntities().filter { identifiers.contains($0.id) }
+    }
+    @MainActor func entities(matching string: String) async throws -> [BillingCategory] {
+        try await suggestedEntities().filter { $0.name.localizedCaseInsensitiveContains(string) }
+    }
+}
+
+
+@available(iOS 16.0, *)
+struct BillingTag: AppEntity {
+    static var typeDisplayRepresentation: TypeDisplayRepresentation = "标签"
+    static var defaultQuery = BillingTagQuery()
+    var id: Int
+    var name: String
+    var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(name)") }
+}
+@available(iOS 16.0, *)
+struct BillingTagQuery: EntityStringQuery {
+    @MainActor func suggestedEntities() async throws -> [BillingTag] {
+        let options = try await ConfirmedBilling.call(["operation": "options"])
+        var rows = options["tags"] as? [[String: Any]] ?? []
+        
+        return rows.compactMap { row in
+            guard let id = row["id"] as? Int, let name = row["name"] as? String else { return nil }
+            return BillingTag(id: id, name: name)
+        }
+    }
+    @MainActor func entities(for identifiers: [Int]) async throws -> [BillingTag] {
+        try await suggestedEntities().filter { identifiers.contains($0.id) }
+    }
+    @MainActor func entities(matching string: String) async throws -> [BillingTag] {
+        try await suggestedEntities().filter { $0.name.localizedCaseInsensitiveContains(string) }
+    }
+}
+
+
+@available(iOS 16.0, *)
+@MainActor
+enum CustomBilling {
+    static func draft(type: String, ledger: BillingLedger?, category: BillingCategory?, amount: String?, date: Date?, note: String?, account: BillingAccount?, destination: BillingAccount? = nil, tags: [BillingTag]?, excluded: Bool = false) async throws -> String {
+        var request: [String: Any] = ["operation": "options", "type": type]
+        if let ledger { request["ledgerId"] = ledger.id }
+        let options = try await ConfirmedBilling.call(request)
+        let defaults = options["defaults"] as? [String: Any] ?? [:]
+        var candidate: [String: Any] = ["type": type, "note": note ?? "", "excludeFromBudget": type == "expense" && excluded, "tagIds": tags?.map { $0.id } ?? defaults["tagIds"] as? [Int] ?? []]
+        if let amount, !amount.isEmpty { candidate["amountMinor"] = try ConfirmedBilling.minor(amount, digits: options["minorDigits"] as? Int ?? 2) }
+        if let category { candidate["categoryId"] = category.id }
+        if let account { candidate["accountId"] = account.id }
+        if let destination { candidate["toAccountId"] = destination.id }
+        if let date { candidate["occurredAt"] = ISO8601DateFormatter().string(from: date) }
+        return try ConfirmedBilling.encode(["status": "draft", "requestId": UUID().uuidString, "ledgerId": options["ledgerId"]!, "currency": options["currency"]!, "candidates": [candidate]])
+    }
+    static func result(_ text: String) throws -> IntentDialog {
+        let object = try ConfirmedBilling.decode(text)
+        return IntentDialog(stringLiteral: "已入账 " + String(object["count"] as? Int ?? 0) + " 条，合计 " + ConfirmedBilling.money(object["totalAmountMinor"] as? Int ?? 0, digits: object["minorDigits"] as? Int ?? 2) + "。云端尚未确认，请查看 App 同步状态，无需重记。")
+    }
+}
+
+
+@available(iOS 16.0, *)
+struct CustomExpenseBillingIntent: AppIntent {
+    static var title: LocalizedStringResource = "自定义支出账单"
+    static var description: LocalizedStringResource = "直接填写字段，运行后在系统菜单核对修改，最后确认一次入账。"
+    static var openAppWhenRun = false
+        @Parameter(title: "账本") var ledger: BillingLedger?
+    @Parameter(title: "分类") var category: BillingCategory?
+    @Parameter(title: "金额") var amount: String?
+    @Parameter(title: "时间") var date: Date?
+    @Parameter(title: "备注") var note: String?
+    @Parameter(title: "账户") var account: BillingAccount?
+    @Parameter(title: "标签") var tags: [BillingTag]?
+    @Parameter(title: "不计预算", default: false) var excluded: Bool
+    @Parameter(title: "菜单") var choice: String?
+    @Parameter(title: "输入") var textValue: String?
+    static var parameterSummary: some ParameterSummary {
+        Summary("自定义支出账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$account; \.$tags; \.$excluded }
+    }
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+        let draft = try await CustomBilling.draft(type: "expense", ledger: ledger, category: category, amount: amount, date: date, note: note, account: account, destination: nil, tags: tags, excluded: excluded)
+        let editor = ConfirmedBillingEditor(draft: draft, choose: { values, prompt in
+            try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
+        }, input: { prompt in try await $textValue.requestValue(IntentDialog(stringLiteral: prompt)) })
+        let submission = try await editor.runEditor()
+        let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission))
+        return .result(value: saved, dialog: try CustomBilling.result(saved))
+    }
+}
+
+
+@available(iOS 16.0, *)
+struct CustomIncomeBillingIntent: AppIntent {
+    static var title: LocalizedStringResource = "自定义收入账单"
+    static var description: LocalizedStringResource = "直接填写字段，运行后在系统菜单核对修改，最后确认一次入账。"
+    static var openAppWhenRun = false
+        @Parameter(title: "账本") var ledger: BillingLedger?
+    @Parameter(title: "分类") var category: BillingCategory?
+    @Parameter(title: "金额") var amount: String?
+    @Parameter(title: "时间") var date: Date?
+    @Parameter(title: "备注") var note: String?
+    @Parameter(title: "账户") var account: BillingAccount?
+    @Parameter(title: "标签") var tags: [BillingTag]?
+    @Parameter(title: "菜单") var choice: String?
+    @Parameter(title: "输入") var textValue: String?
+    static var parameterSummary: some ParameterSummary {
+        Summary("自定义收入账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$account; \.$tags }
+    }
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+        let draft = try await CustomBilling.draft(type: "income", ledger: ledger, category: category, amount: amount, date: date, note: note, account: account, destination: nil, tags: tags, excluded: false)
+        let editor = ConfirmedBillingEditor(draft: draft, choose: { values, prompt in
+            try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
+        }, input: { prompt in try await $textValue.requestValue(IntentDialog(stringLiteral: prompt)) })
+        let submission = try await editor.runEditor()
+        let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission))
+        return .result(value: saved, dialog: try CustomBilling.result(saved))
+    }
+}
+
+
+@available(iOS 16.0, *)
+struct CustomTransferBillingIntent: AppIntent {
+    static var title: LocalizedStringResource = "自定义转账账单"
+    static var description: LocalizedStringResource = "直接填写字段，运行后在系统菜单核对修改，最后确认一次入账。"
+    static var openAppWhenRun = false
+        @Parameter(title: "账本") var ledger: BillingLedger?
+    @Parameter(title: "金额") var amount: String?
+    @Parameter(title: "时间") var date: Date?
+    @Parameter(title: "备注") var note: String?
+    @Parameter(title: "转出账户") var account: BillingAccount?
+    @Parameter(title: "转入账户") var destination: BillingAccount?
+    @Parameter(title: "标签") var tags: [BillingTag]?
+    @Parameter(title: "菜单") var choice: String?
+    @Parameter(title: "输入") var textValue: String?
+    static var parameterSummary: some ParameterSummary {
+        Summary("自定义转账账单") { \.$ledger; \.$amount; \.$date; \.$note; \.$account; \.$destination; \.$tags }
+    }
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+        let draft = try await CustomBilling.draft(type: "transfer", ledger: ledger, category: nil, amount: amount, date: date, note: note, account: account, destination: destination, tags: tags, excluded: false)
+        let editor = ConfirmedBillingEditor(draft: draft, choose: { values, prompt in
+            try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
+        }, input: { prompt in try await $textValue.requestValue(IntentDialog(stringLiteral: prompt)) })
+        let submission = try await editor.runEditor()
+        let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission))
+        return .result(value: saved, dialog: try CustomBilling.result(saved))
+    }
+}
+
 @available(iOS 16.0, *)
 struct RecognizeConfirmBillingIntent: AppIntent {
     static var title: LocalizedStringResource = "识别并确认记账"
@@ -592,6 +869,9 @@ struct RecognizeConfirmBillingIntent: AppIntent {
     @Parameter(title: "使用本地 OCR 后文字 AI（留空跟随 App）") var useOCR: Bool?
     @Parameter(title: "默认配置 JSON") var configuration: String?
     @Parameter(title: "菜单") var choice: String?
+    static var parameterSummary: some ParameterSummary {
+        Summary("识别\(\.$image)并确认记账") { \.$useOCR }
+    }
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
         let config = try configuration.map(ConfirmedBilling.decode) ?? [:]
         let options = try await ConfirmedBilling.call(config.merging(["operation": "options"]) { _, new in new })
