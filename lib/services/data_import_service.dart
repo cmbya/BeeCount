@@ -102,11 +102,17 @@ class ImportTransaction {
   final String? syncId; // 跨设备同步唯一标识
   /// v30 多币种:CSV 币种列(反馈10)。null → 账户币种/账本本位币兜底。
   final String? currencyCode;
+  final double? nativeAmount;
+  final bool excludeFromBudget;
+  final bool excludeFromStats;
 
   const ImportTransaction({
     required this.type,
     required this.amount,
     this.currencyCode,
+    this.nativeAmount,
+    this.excludeFromBudget = false,
+    this.excludeFromStats = false,
     this.categoryName,
     this.categoryKind,
     required this.happenedAt,
@@ -599,7 +605,9 @@ class DataImportService {
         note: d.Value(tx.note),
         syncId: d.Value(tx.syncId),
         currencyCode: d.Value(txCurrency),
-        nativeAmount: d.Value(txNative),
+        nativeAmount: d.Value(tx.nativeAmount ?? txNative),
+        excludeFromBudget: d.Value(tx.excludeFromBudget),
+        excludeFromStats: d.Value(tx.excludeFromStats),
       );
 
       final indexInBatch = batchTx.length;

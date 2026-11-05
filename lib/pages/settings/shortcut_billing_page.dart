@@ -233,6 +233,11 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
               final validCats = categories.map((c) => c.id).toSet();
               final ledgerId = defaults['ledgerId'] as int?;
               final accountId = defaults['accountId'] as int?;
+              final currency =
+                  ledgers.where((l) => l.id == ledgerId).firstOrNull?.currency;
+              final usableAccounts = accounts
+                  .where((a) => currency == null || a.currency == currency)
+                  .toList();
               return ListView(padding: const EdgeInsets.all(16), children: [
                 const Text('确认后才保存',
                     style:
@@ -253,11 +258,11 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                       saveDefaults();
                     }),
                 DropdownButtonFormField<int>(
-                    value: accounts.any((a) => a.id == accountId)
+                    value: usableAccounts.any((a) => a.id == accountId)
                         ? accountId
                         : null,
                     decoration: const InputDecoration(labelText: '默认账户'),
-                    items: accounts
+                    items: usableAccounts
                         .map((a) =>
                             DropdownMenuItem(value: a.id, child: Text(a.name)))
                         .toList(),
@@ -366,7 +371,7 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                 const Divider(height: 32),
                 const Text('快捷指令配置'),
                 const SelectableText(
-                    '截图 → 图片生成记账草稿（或本地取字 → 文字生成记账草稿）→ 确认编辑支出草稿 → 提交已确认支出。也可以用“识别并确认记账”组合动作。\n图片模式将图片发送给 App 中配置的视觉服务；OCR 模式只发送文字给文字服务，仍可能联网。失败不会自动切换为上传图片。'),
+                    '截图 → 图片生成记账草稿（或本地取字 → 文字生成记账草稿）→ 确认编辑记账草稿 → 提交已确认账单。也可以用“识别并确认记账”组合动作。\n图片模式将图片发送给 App 中配置的视觉服务；OCR 模式只发送文字给文字服务，仍可能联网。失败不会自动切换为上传图片。'),
                 const SizedBox(height: 16),
                 const Text('最近提交凭证（点击复制请求 ID）'),
                 const Text(

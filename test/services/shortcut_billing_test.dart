@@ -4,6 +4,7 @@ import 'package:beecount/data/db.dart';
 import 'package:beecount/data/repositories/local/local_repository.dart';
 import 'package:beecount/services/automation/shortcut_schema.dart';
 import 'package:beecount/services/automation/shortcut_store.dart';
+import 'package:beecount/cloud/transactions_json.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -72,6 +73,60 @@ void main() {
           .read<int>('n');
   Matcher failure(String code) =>
       isA<ShortcutFailure>().having((e) => e.code, 'code', code);
+
+  test(
+      'existing JSON backup round trip preserves split rows, tags and budget flags',
+      () async {
+    await store.commit(ShortcutSubmission.fromJson(payload()));
+    final backup = await exportTransactionsJson(db, ledger);
+    final restoredDb = BeeDatabase.forTesting(NativeDatabase.memory());
+    final restored = LocalRepository(restoredDb);
+    try {
+      final id = await restored.createLedger(name: '恢复');
+      expect((await importTransactionsJson(restored, id, backup)).inserted, 3);
+      final rows = await restoredDb.select(restoredDb.transactions).get();
+      expect(rows.map((t) => t.amount).reduce((a, b) => a + b), 300);
+      expect(rows.where((t) => t.excludeFromBudget).single.amount, 150);
+      expect((await restored.getAllTags()).map((t) => t.name).toSet(),
+          {'家庭', '个人'});
+      expect((await restoredDb.select(restoredDb.transactionTags).get()),
+          hasLength(3));
+      final budget = await restored.createBudget(
+          ledgerId: id, type: 'total', amount: 1000);
+      expect(
+          (await restored.getBudgetUsage(budget, DateTime(2026, 11, 5))).used,
+          150);
+      expect((await restoredDb.select(restoredDb.accounts).get()).single.name,
+          '支付宝');
+    } finally {
+      await restoredDb.close();
+    }
+  });
+
+  test(
+      'transfer receipt failure rolls back transfer and virtual category creation',
+      () async {
+    final target = await repo.createAccount(ledgerId: ledger, name: '目标');
+    final data = payload()..['type'] = 'transfer';
+    data['toAccountId'] = target;
+    data['entries'] = [
+      {
+        ...(data['entries'] as List).first as Map<String, dynamic>,
+        'amountMinor': 30000,
+        'categoryId': null
+      }
+    ];
+    await db.customStatement(
+        "CREATE TRIGGER fail_transfer_receipt BEFORE INSERT ON shortcut_receipts BEGIN SELECT RAISE(ABORT, 'test'); END");
+    await expectLater(store.commit(ShortcutSubmission.fromJson(data)),
+        throwsA(failure('COMMIT_FAILED')));
+    expect(await count('transactions'), 0);
+    expect(await count('shortcut_groups'), 0);
+    expect((await repo.getAllCategories()).where((c) => c.kind == 'transfer'),
+        isEmpty);
+    expect(await repo.getAccountBalance(account), 0);
+    expect(await repo.getAccountBalance(target), 0);
+  });
 
   test(
       'income saves one row, increases balance and does not use expense budget',

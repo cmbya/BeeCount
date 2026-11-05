@@ -31,12 +31,15 @@ jobs:
           test/services/shortcut_billing_test.dart
           test/services/shortcut_draft_test.dart
           test/services/shortcut_settings_test.dart
+          test/services/shortcut_ai_transport_test.dart
       - name: Verify transactions and idempotency
         run: >-
           flutter test --no-pub
           test/services/shortcut_billing_test.dart
           test/services/shortcut_draft_test.dart
           test/services/shortcut_settings_test.dart
+          test/services/shortcut_ai_transport_test.dart
+          test/services/data_import_multi_currency_test.dart
           test/repositories/budget_exclude_flags_test.dart
           test/repositories/tag_stats_range_test.dart
           test/data/repositories/local_repository_bulk_sync_test.dart

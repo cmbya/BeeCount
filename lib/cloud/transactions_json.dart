@@ -149,6 +149,10 @@ Future<String> exportTransactionsJson(BeeDatabase db, int ledgerId) async {
     final item = <String, dynamic>{
       'type': t.type,
       'amount': t.amount,
+      'excludeFromBudget': t.excludeFromBudget,
+      'excludeFromStats': t.excludeFromStats,
+      if (t.currencyCode != null) 'currencyCode': t.currencyCode,
+      if (t.nativeAmount != null) 'nativeAmount': t.nativeAmount,
       'categoryName': catInfo?['name'],
       'categoryKind': catInfo?['kind'],
       'happenedAt': t.happenedAt.toUtc().toIso8601String(),
@@ -383,6 +387,10 @@ ImportData parseJsonToImportData(String jsonStr) {
       transactions.add(ImportTransaction(
         type: type,
         amount: (it['amount'] as num).toDouble(),
+        excludeFromBudget: it['excludeFromBudget'] == true,
+        excludeFromStats: it['excludeFromStats'] == true,
+        currencyCode: it['currencyCode'] as String?,
+        nativeAmount: (it['nativeAmount'] as num?)?.toDouble(),
         categoryName: it['categoryName'] as String?,
         categoryKind: it['categoryKind'] as String?,
         happenedAt: DateTime.parse(it['happenedAt'] as String).toLocal(),
