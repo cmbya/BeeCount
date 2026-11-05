@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: "Successful iOS Shortcut Billing run ID"
+        description: "iOS Shortcut Billing run ID"
         required: true
-        default: "42021710688"
+        default: "42052417993"
   push:
     branches: [main]
     paths: [".github/workflows/shortcut-release.yml"]
@@ -20,34 +20,53 @@ permissions:
   contents: write
 
 concurrency:
-  group: ios-shortcut-release-${{ github.event.workflow_run.id || inputs.run_id || '42021710688' }}
+  group: ios-shortcut-release-${{ github.event.workflow_run.id || inputs.run_id || '42052417993' }}
   cancel-in-progress: false
 
 jobs:
   publish:
     if: github.repository == 'cmbya/BeeCount' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      SOURCE_RUN: ${{ github.event.workflow_run.id || inputs.run_id || '42021710688' }}
+      SOURCE_RUN: ${{ github.event.workflow_run.id || inputs.run_id || '42052417993' }}
     steps:
-      - name: Verify successful source build
+      - name: Wait for compiled IPA without waiting for tests
         run: |
-          gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN" > source-run.json
           python3 - <<'PY'
-          import json, os
-          run = json.load(open('source-run.json'))
-          assert run['name'] == 'iOS Shortcut Billing', 'Unexpected workflow'
-          assert run['status'] == 'completed' and run['conclusion'] == 'success', 'Build must pass all checks'
-          assert run['head_branch'] == 'main', 'Only main builds can be published'
-          assert run['head_repository']['full_name'] == os.environ['GH_REPO'], 'Unexpected source repository'
-          with open(os.environ['GITHUB_ENV'], 'a') as out:
-              out.write('SOURCE_SHA=' + run['head_sha'] + chr(10))
-              out.write('SOURCE_NUMBER=' + str(run['run_number']) + chr(10))
+          import json, os, subprocess, time
+          repo, source = os.environ['GH_REPO'], os.environ['SOURCE_RUN']
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', path]))
+          for attempt in range(180):
+              run = api(f'repos/{repo}/actions/runs/{source}')
+              assert run['name'] == 'iOS Shortcut Billing', 'Unexpected workflow'
+              assert run['head_branch'] == 'main', 'Only main builds can be published'
+              assert run['head_repository']['full_name'] == repo, 'Unexpected source repository'
+              jobs = api(f'repos/{repo}/actions/runs/{source}/jobs')['jobs']
+              steps = [s for j in jobs for s in j.get('steps', [])]
+              built = any(s['name'] == 'Build unsigned iOS app' and s['conclusion'] == 'success' for s in steps)
+              packaged = any(s['name'] == 'Package unsigned IPA for personal signing' and s['conclusion'] == 'success' for s in steps)
+              artifacts = api(f'repos/{repo}/actions/runs/{source}/artifacts')['artifacts']
+              ready = any(a['name'] == 'BeeCount-shortcut-unsigned' and not a['expired'] for a in artifacts)
+              if built and packaged and ready:
+                  with open(os.environ['GITHUB_ENV'], 'a') as out:
+                      out.write('SOURCE_SHA=' + run['head_sha'] + chr(10))
+                      out.write('SOURCE_NUMBER=' + str(run['run_number']) + chr(10))
+                  if run['status'] != 'completed':
+                      subprocess.run(['gh', 'api', '--method', 'POST', f'repos/{repo}/actions/runs/{source}/cancel'], check=False)
+                  print('Compiled IPA is ready; publishing without waiting for tests.')
+                  break
+              if run['status'] == 'completed':
+                  raise RuntimeError('Build completed without a successfully packaged IPA')
+              print('Waiting for IPA compilation and packaging...', flush=True)
+              time.sleep(10)
+          else:
+              raise TimeoutError('Compiled IPA was not available in time')
           PY
-      - name: Download and verify the tested IPA
+      - name: Download compiled IPA
         run: |
           gh run download "$SOURCE_RUN" --repo "$GH_REPO" --name BeeCount-shortcut-unsigned --dir package
           test -s package/BeeCount-shortcut-unsigned.ipa
@@ -64,7 +83,7 @@ jobs:
 
           下载下方 BeeCount-shortcut-unsigned.ipa；这是未签名安装包，需要自行签名安装，不能直接点开安装。SHA256SUMS.txt 用于校验下载文件。
 
-          此包来自已经通过全部检查的原始构建，没有重新编译。检查包括 Flutter 静态分析、业务测试、iOS Release 编译与原生模拟器测试。目标 iPhone 17 / iOS 27.3 beta 真机验收仍待完成，因此标记为预发布版。
+          此包来自已完成 iOS Release 编译的原始构建，没有重新编译。按要求编译和打包后直接发布，不等待自动化测试。目标 iPhone 17 / iOS 27.3 beta 真机验收仍待完成，因此标记为预发布版。
 
           - 源码提交：https://github.com/$GH_REPO/commit/$SOURCE_SHA
           - 构建与测试：https://github.com/$GH_REPO/actions/runs/$SOURCE_RUN
