@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ios-shortcut-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: macos-latest
@@ -73,4 +77,3 @@ jobs:
             build/shortcut-native-tests.log
             build/shortcut-native-tests.xcresult
           retention-days: 14
-
