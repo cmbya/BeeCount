@@ -125,7 +125,7 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                               DropdownMenuItem(
                                   value: 'note', child: Text('备注')),
                               DropdownMenuItem(
-                                  value: 'ocr', child: Text('OCR 原文（文字模式）'))
+                                  value: 'ocr', child: Text('原文关键词（图片本地 OCR／文字输入）'))
                             ],
                             onChanged: (v) => update(() => field = v!)),
                         DropdownButtonFormField<String>(
@@ -241,13 +241,6 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
               if (snapshot.connectionState != ConnectionState.done)
                 return const Center(child: CircularProgressIndicator());
               final validCats = categories.map((c) => c.id).toSet();
-              final ledgerId = defaults['ledgerId'] as int?;
-              final accountId = defaults['accountId'] as int?;
-              final currency =
-                  ledgers.where((l) => l.id == ledgerId).firstOrNull?.currency;
-              final usableAccounts = accounts
-                  .where((a) => currency == null || a.currency == currency)
-                  .toList();
               return ListView(padding: const EdgeInsets.all(16), children: [
                 const Text('确认后才保存',
                     style:
@@ -255,34 +248,13 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                 const Text(
                     '支出可拆分后一次提交，取消不入账。支持个人账本与同币种账户，金额精度跟随账本。原截图自动记账入口保持原行为。'),
                 const SizedBox(height: 16),
-                DropdownButtonFormField<int>(
-                    value:
-                        ledgers.any((l) => l.id == ledgerId) ? ledgerId : null,
-                    decoration: const InputDecoration(labelText: '默认账本'),
-                    items: ledgers
-                        .map((l) =>
-                            DropdownMenuItem(value: l.id, child: Text(l.name)))
-                        .toList(),
-                    onChanged: (v) {
-                      defaults['ledgerId'] = v;
-                      saveDefaults();
-                    }),
-                DropdownButtonFormField<int>(
-                    value: usableAccounts.any((a) => a.id == accountId)
-                        ? accountId
-                        : null,
-                    decoration: const InputDecoration(labelText: '默认账户'),
-                    items: usableAccounts
-                        .map((a) =>
-                            DropdownMenuItem(value: a.id, child: Text(a.name)))
-                        .toList(),
-                    onChanged: (v) {
-                      defaults['accountId'] = v;
-                      saveDefaults();
-                    }),
+                const ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text('账本：使用 App 当前账本'),
+                    subtitle: Text('可在图片记账或文字记账动作中预设账本覆盖。账户按内容识别，无法唯一匹配时弹出选择，不使用旧默认账户。')),
                 DropdownButtonFormField<String>(
                     value: defaults['mode'] as String? ?? 'image',
-                    decoration: const InputDecoration(labelText: '默认识别方式'),
+                    decoration: const InputDecoration(labelText: '旧版图片动作的识别方式'),
                     items: const [
                       DropdownMenuItem(value: 'image', child: Text('图片 AI')),
                       DropdownMenuItem(
@@ -386,7 +358,7 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                 const Divider(height: 32),
                 const Text('快捷指令配置'),
                 const SelectableText(
-                    '截图 → 识别并确认记账。只需这一个记账动作，运行后直接点金额、分类、账户等行修改，最后确认提交。手动或自建识别流程可用“自定义支出账单 / 自定义收入账单 / 自定义转账账单”，直接填写字段或接入变量，无需 JSON。图片模式将图片发送给视觉服务；OCR 模式只发送文字，仍可能联网。'),
+                    '图片：截屏 → 图片记账。文字：截屏 → 提取文本 → 文字记账。两个动作均调用 App 内配置的 AI 自动判断收支、提取金额、账户、时间和备注；分类规则优先。运行后点击已填好的字段修改，标签和支出预算标记也在菜单中；可拆分，最终确认一次才入账，无需 JSON 或回 App 再确认。图片发送给视觉服务，本地取字补充规则；文字动作只向文字服务发送传入文本。'),
                 const SizedBox(height: 16),
                 const Text('最近提交凭证（点击复制请求 ID）'),
                 const Text(

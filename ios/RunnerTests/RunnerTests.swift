@@ -49,7 +49,7 @@ class RunnerTests: XCTestCase {
   @MainActor
   private func editorDraft(_ type: String = "expense") throws -> String {
     try ConfirmedBilling.encode(["status": "draft", "ledgerId": 1, "currency": "CNY", "requestId": UUID().uuidString,
-      "candidates": [["type": type, "amountMinor": 30000, "categoryId": 10, "note": "原文", "tagIds": [3], "excludeFromBudget": false]]])
+      "candidates": [["type": type, "accountId": 1, "amountMinor": 30000, "categoryId": 10, "note": "原文", "tagIds": [3], "excludeFromBudget": false]]])
   }
 
   @available(iOS 16.0, *)
@@ -90,10 +90,12 @@ class RunnerTests: XCTestCase {
     XCTAssertFalse(TextBillingDraftIntent.isDiscoverable)
     XCTAssertFalse(EditBillingDraftIntent.isDiscoverable)
     XCTAssertFalse(CommitConfirmedBillingIntent.isDiscoverable)
-    XCTAssertTrue(CustomExpenseBillingIntent.isDiscoverable)
-    XCTAssertTrue(CustomIncomeBillingIntent.isDiscoverable)
-    XCTAssertTrue(CustomTransferBillingIntent.isDiscoverable)
-    XCTAssertTrue(RecognizeConfirmBillingIntent.isDiscoverable)
+    XCTAssertFalse(CustomExpenseBillingIntent.isDiscoverable)
+    XCTAssertFalse(CustomIncomeBillingIntent.isDiscoverable)
+    XCTAssertFalse(CustomTransferBillingIntent.isDiscoverable)
+    XCTAssertFalse(RecognizeConfirmBillingIntent.isDiscoverable)
+    XCTAssertTrue(ImageConfirmBillingIntent.isDiscoverable)
+    XCTAssertTrue(TextConfirmBillingIntent.isDiscoverable)
   }
 
   @available(iOS 16.0, *)
@@ -272,6 +274,42 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(ConfirmedBilling.updatedNote("原文", action: "保存空备注", value: nil), "")
     XCTAssertEqual(ConfirmedBilling.updatedNote("原文", action: "编辑", value: nil), "原文")
     XCTAssertEqual(ConfirmedBilling.updatedNote("原文", action: "取消修改", value: "丢弃"), "原文")
+  }
+
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testRecognitionPresetSupportsLedgerAndExplicitEmptyTags() {
+    let ledger = BillingLedger(id: 2, name: "家庭")
+    let config = RecognitionBillingFlow.configuration(ledger: ledger, tags: [BillingTag(id: 3, name: "个人")], clearTags: true, excluded: false)
+    XCTAssertEqual(config["ledgerId"] as? Int, 2)
+    XCTAssertEqual(config["tagIds"] as? [Int], [])
+    XCTAssertEqual(config["excludeFromBudget"] as? Bool, false)
+    XCTAssertNil(config["accountId"])
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testMissingRecognizedAccountPromptsInsteadOfUsingDefault() async throws {
+    var draft = try ConfirmedBilling.decode(editorDraft())
+    var candidates = try XCTUnwrap(draft["candidates"] as? [[String: Any]])
+    candidates[0].removeValue(forKey: "accountId")
+    candidates[0]["requiresAccountSelection"] = true
+    draft["candidates"] = candidates
+    var choices = ["2. 银行卡", "确认提交"]
+    var asked = false
+    let editor = ConfirmedBillingEditor(draft: try ConfirmedBilling.encode(draft), choose: { values, prompt in
+      if prompt.contains("选择付款") { asked = true }
+      let selected = self.menuValue(choices.removeFirst(), values)
+      XCTAssertTrue(values.contains(selected))
+      return selected
+    }, input: { _ in XCTFail("Unexpected input"); return "" }, call: { request in
+      request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions()
+    })
+    let result = try ConfirmedBilling.decode(await editor.runEditor())
+    XCTAssertTrue(asked)
+    XCTAssertEqual(result["accountId"] as? Int, 2)
+    XCTAssertTrue(choices.isEmpty)
   }
 
   private func screenshot(width: CGFloat, height: CGFloat) throws -> Data {

@@ -150,12 +150,16 @@ struct AutoBillingAppIntent: AppIntent {
 struct AutoBillingShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
-            intent: RecognizeConfirmBillingIntent(),
+            intent: ImageConfirmBillingIntent(),
             phrases: [
                 "在\(.applicationName)中截图记账",
                 "用\(.applicationName)记账",
                 "打开\(.applicationName)自动记账"
             ]
+        )
+        AppShortcut(
+            intent: TextConfirmBillingIntent(),
+            phrases: ["用\(.applicationName)文字记账"]
         )
     }
 }
@@ -205,14 +209,7 @@ enum ConfirmedBilling {
         var input = try configuration.map(decode) ?? [:]
         input["operation"] = "recognize"
         if ocr {
-            let text: String = try await Task.detached {
-                let request = VNRecognizeTextRequest()
-                request.recognitionLevel = .accurate
-                request.usesLanguageCorrection = true
-                request.recognitionLanguages = ["zh-Hans", "en-US"]
-                try VNImageRequestHandler(data: data).perform([request])
-                return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
-            }.value
+            let text = try await localText(data)
             input["mode"] = "text"
             input["text"] = text
             // No image path or bytes enter the text request.
@@ -239,7 +236,40 @@ enum ConfirmedBilling {
         defer { try? FileManager.default.removeItem(at: path) }
         input["mode"] = "image"
         input["imagePath"] = path.path
-        return try await call(input)
+        // Local OCR supplements rules; this is still a vision AI request.
+        let ruleText = try? await localText(data)
+        input["ruleText"] = ruleText ?? ""
+        var draft = try await call(input)
+        if ruleText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            var candidates = draft["candidates"] as? [[String: Any]] ?? []
+            for index in candidates.indices {
+                var warnings = candidates[index]["warnings"] as? [String] ?? []
+                warnings.append("本地取字未完成，全文分类规则可能未命中，请核对分类")
+                candidates[index]["warnings"] = warnings
+            }
+            draft["candidates"] = candidates
+        }
+        return draft
+    }
+    static func localText(_ data: Data) async throws -> String {
+        try await Task.detached {
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            request.recognitionLanguages = ["zh-Hans", "en-US"]
+            try VNImageRequestHandler(data: data).perform([request])
+            return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+        }.value
+    }
+    static func displayTime(_ value: String) -> String {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard let date = fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value) else { return value }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: date)
     }
     static func commit(_ submission: [String: Any]) async throws -> String {
         guard submission["confirmed"] as? Bool == true,
@@ -488,8 +518,11 @@ final class ConfirmedBillingEditor {
             if let amount = try? ConfirmedBilling.minor(value, digits: digits) { total = amount }
             else { _ = try await choose(["重新填写"], "金额无效，请填写正金额并遵守账本小数位数") }
         }
-        var accountId = candidate["accountId"] as? Int ?? defaults["accountId"] as? Int
-        if !accounts.contains(where: { $0["id"] as? Int == accountId }) { accountId = try await pick(accounts, "选择付款账户") }
+        // Missing/ambiguous recognition must ask, not inherit a default account.
+        var accountId = candidate["accountId"] as? Int
+        if !accounts.contains(where: { $0["id"] as? Int == accountId }) {
+            accountId = try await pick(accounts, type == "income" ? "选择收款账户" : "选择付款或转出账户")
+        }
         var toAccountId = candidate["toAccountId"] as? Int
         if type == "transfer" && !accounts.contains(where: { $0["id"] as? Int == toAccountId && toAccountId != accountId }) { toAccountId = try await pick(accounts.filter { $0["id"] as? Int != accountId }, "选择转入账户") }
         var time = candidate["occurredAt"] as? String ?? ISO8601DateFormatter().string(from: Date())
@@ -505,7 +538,7 @@ final class ConfirmedBillingEditor {
             let excess = used > total ? "（超额 " + ConfirmedBilling.money(used - total, digits: digits) + "，请修改）" : ""
             let ledgerName = ConfirmedBilling.label(ledgerId, options["ledgers"] as? [[String: Any]] ?? [])
             let accountSummary = ConfirmedBilling.label(accountId, accounts) + (type == "transfer" ? " → " + ConfirmedBilling.label(toAccountId, accounts) : "")
-            let summary = typeName(type) + " " + ConfirmedBilling.money(total, digits: digits) + " " + currency + " · 账本 " + ledgerName + " · 账户 " + accountSummary + "\n时间：" + time + "\n剩余：" + ConfirmedBilling.money(max(0, total - used), digits: digits) + excess + "\n" + detail
+            let summary = typeName(type) + " " + ConfirmedBilling.money(total, digits: digits) + " " + currency + " · 账本 " + ledgerName + " · 账户 " + accountSummary + "\n时间：" + ConfirmedBilling.displayTime(time) + "\n剩余：" + ConfirmedBilling.money(max(0, total - used), digits: digits) + excess + "\n" + detail
             let single = entries.count == 1 && !didSplit
             let entry = entries.first ?? [:]
             let tagNames = (entry["tagIds"] as? [Int] ?? []).map { ConfirmedBilling.label($0, tags) }.joined(separator: "、")
@@ -514,7 +547,7 @@ final class ConfirmedBillingEditor {
             let selected = try await fields(actions, title: single ? "确认" + typeName(type) + "信息" : summary, values: [
                 "金额": ConfirmedBilling.money(total, digits: digits), "分类": ConfirmedBilling.label(entry["categoryId"] as? Int, categories),
                 "账户": ConfirmedBilling.label(accountId, accounts), "转入账户": ConfirmedBilling.label(toAccountId, accounts),
-                "时间": time, "备注": entry["note"] as? String ?? "", "标签": tagNames.isEmpty ? "无" : tagNames,
+                "时间": ConfirmedBilling.displayTime(time), "备注": entry["note"] as? String ?? "", "标签": tagNames.isEmpty ? "无" : tagNames,
                 "不计预算": entry["excludeFromBudget"] as? Bool == true ? "不计入预算" : "计入预算",
                 "账本": ledgerName, "收支类型": typeName(type)
             ])
@@ -778,6 +811,8 @@ enum CustomBilling {
 
 @available(iOS 16.0, *)
 struct CustomExpenseBillingIntent: AppIntent {
+    // Kept for existing shortcuts; use the image/text recognition actions.
+    static var isDiscoverable: Bool = false
     static var title: LocalizedStringResource = "自定义支出账单"
     static var description: LocalizedStringResource = "直接填写字段，运行后在系统菜单核对修改，最后确认一次入账。"
     static var openAppWhenRun = false
@@ -808,6 +843,8 @@ struct CustomExpenseBillingIntent: AppIntent {
 
 @available(iOS 16.0, *)
 struct CustomIncomeBillingIntent: AppIntent {
+    // Kept for existing shortcuts; use the image/text recognition actions.
+    static var isDiscoverable: Bool = false
     static var title: LocalizedStringResource = "自定义收入账单"
     static var description: LocalizedStringResource = "直接填写字段，运行后在系统菜单核对修改，最后确认一次入账。"
     static var openAppWhenRun = false
@@ -837,6 +874,8 @@ struct CustomIncomeBillingIntent: AppIntent {
 
 @available(iOS 16.0, *)
 struct CustomTransferBillingIntent: AppIntent {
+    // Kept for existing shortcuts; use the image/text recognition actions.
+    static var isDiscoverable: Bool = false
     static var title: LocalizedStringResource = "自定义转账账单"
     static var description: LocalizedStringResource = "直接填写字段，运行后在系统菜单核对修改，最后确认一次入账。"
     static var openAppWhenRun = false
@@ -865,6 +904,8 @@ struct CustomTransferBillingIntent: AppIntent {
 
 @available(iOS 16.0, *)
 struct RecognizeConfirmBillingIntent: AppIntent {
+    // Kept for existing shortcuts; use the image/text recognition actions.
+    static var isDiscoverable: Bool = false
     static var title: LocalizedStringResource = "识别并确认记账"
     static var description: LocalizedStringResource = "图片或本地 OCR 识别，系统菜单编辑和拆分，最终一次确认直接入账。"
     static var openAppWhenRun = false
@@ -902,7 +943,8 @@ struct RecognizeConfirmBillingIntent: AppIntent {
             let defaults = config
             let options = try await ConfirmedBilling.call(defaults.merging(["operation": "options"]) { _, new in new })
             let appDefaults = options["defaults"] as? [String: Any] ?? [:]
-            let manual = appDefaults.merging(defaults) { _, explicit in explicit }
+            var manual = appDefaults.merging(defaults) { _, explicit in explicit }
+            manual.removeValue(forKey: "accountId")
             draft = ["status": "draft", "requestId": UUID().uuidString, "ledgerId": options["ledgerId"]!, "currency": options["currency"]!, "candidates": [manual]]
         }
         var editor = EditBillingDraftIntent()
@@ -919,4 +961,113 @@ struct RecognizeConfirmBillingIntent: AppIntent {
         return .result(value: result, dialog: IntentDialog(stringLiteral: message))
     }
 }
+
+// Both public actions own their prompt parameters and share the same editor.
+// They do not invoke another hidden intent's perform() or ask for JSON.
+@available(iOS 16.0, *)
+@MainActor
+enum RecognitionBillingFlow {
+    static func configuration(ledger: BillingLedger?, tags: [BillingTag]?, clearTags: Bool, excluded: Bool?) -> [String: Any] {
+        var config: [String: Any] = [:]
+        if let ledger { config["ledgerId"] = ledger.id }
+        if clearTags { config["tagIds"] = [Int]() }
+        else if let tags { config["tagIds"] = Array(Set(tags.map { $0.id })).sorted() }
+        if let excluded { config["excludeFromBudget"] = excluded }
+        return config
+    }
+
+    static func run(image: IntentFile? = nil, text: String? = nil,
+                    configuration: [String: Any],
+                    choose: @escaping ([String], String) async throws -> String,
+                    input: @escaping (String) async throws -> String) async throws -> String {
+        guard (image != nil) != (text != nil) else {
+            throw ShortcutBillingError(message: "请选择图片记账或文字记账，并连接对应输入")
+        }
+        // Resolve the ledger before sending any bill data. No first-ledger fallback.
+        let options = try await ConfirmedBilling.call(configuration.merging(["operation": "options"]) { _, value in value })
+        var config = configuration
+        config["ledgerId"] = options["ledgerId"]
+        let privacy = image != nil
+            ? "图片将发送给 App 配置的视觉 AI；本地取字仅补充分类规则。"
+            : "仅将传入文字发送给 App 配置的文字 AI，不发送原图。"
+        if try await choose(["继续识别", "取消"], privacy) == "取消" {
+            throw ShortcutBillingError(message: "已取消，未入账")
+        }
+        var draft: [String: Any]
+        do {
+            if let image {
+                draft = try await ConfirmedBilling.recognizeImage(image, ocr: false, configuration: ConfirmedBilling.encode(config))
+            } else {
+                var payload = config
+                payload["operation"] = "recognize"
+                payload["mode"] = "text"
+                payload["text"] = text ?? ""
+                draft = try await ConfirmedBilling.call(payload)
+            }
+        } catch {
+            let detail = (error as? ShortcutBillingError)?.message ?? "请检查输入和 App 内 AI 配置"
+            if try await choose(["人工填写", "取消"], "识别未完成，未入账。" + detail) == "取消" { throw error }
+            let defaults = options["defaults"] as? [String: Any] ?? [:]
+            var candidate: [String: Any] = ["type": "expense", "note": "",
+                "tagIds": config["tagIds"] ?? defaults["tagIds"] ?? [Int](),
+                "excludeFromBudget": config["excludeFromBudget"] ?? defaults["excludeFromBudget"] ?? false]
+            candidate["requiresAccountSelection"] = true
+            draft = ["status": "draft", "requestId": UUID().uuidString,
+                "ledgerId": options["ledgerId"]!, "currency": options["currency"]!, "candidates": [candidate]]
+        }
+        let editor = ConfirmedBillingEditor(draft: try ConfirmedBilling.encode(draft), choose: choose, input: input)
+        // Cancellation exits before commit. Existing atomic/idempotent store is reused.
+        let submission = try await editor.runEditor()
+        return try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission))
+    }
+}
+
+@available(iOS 16.0, *)
+struct ImageConfirmBillingIntent: AppIntent {
+    static var title: LocalizedStringResource = "图片记账"
+    static var description: LocalizedStringResource = "将图片交给 App 内 AI 判断收支、识别金额和账户；按分类规则预填，核对、编辑或拆分后一次确认入账。"
+    static var openAppWhenRun = false
+    @Parameter(title: "图片") var image: IntentFile
+    @Parameter(title: "账本（留空使用当前账本）") var ledger: BillingLedger?
+    @Parameter(title: "标签（留空跟随 App）") var tags: [BillingTag]?
+    @Parameter(title: "清空标签", default: false) var clearTags: Bool
+    @Parameter(title: "不计预算（仅支出，留空跟随 App）") var excluded: Bool?
+    @Parameter(title: "菜单") var choice: String?
+    @Parameter(title: "输入") var textValue: String?
+    static var parameterSummary: some ParameterSummary {
+        Summary("识别\(\.$image)并确认记账") { \.$ledger; \.$tags; \.$clearTags; \.$excluded }
+    }
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+        let config = RecognitionBillingFlow.configuration(ledger: ledger, tags: tags, clearTags: clearTags, excluded: excluded)
+        let saved = try await RecognitionBillingFlow.run(image: image, configuration: config, choose: { values, prompt in
+            try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
+        }, input: { prompt in try await $textValue.requestValue(IntentDialog(stringLiteral: prompt)) })
+        return .result(value: saved, dialog: try CustomBilling.result(saved))
+    }
+}
+
+@available(iOS 16.0, *)
+struct TextConfirmBillingIntent: AppIntent {
+    static var title: LocalizedStringResource = "文字记账"
+    static var description: LocalizedStringResource = "接收文字或截图 OCR 文本，调用 App 内文字 AI 自动识别，弹窗编辑和拆分，确认后直接入账。"
+    static var openAppWhenRun = false
+    @Parameter(title: "文字") var text: String
+    @Parameter(title: "账本（留空使用当前账本）") var ledger: BillingLedger?
+    @Parameter(title: "标签（留空跟随 App）") var tags: [BillingTag]?
+    @Parameter(title: "清空标签", default: false) var clearTags: Bool
+    @Parameter(title: "不计预算（仅支出，留空跟随 App）") var excluded: Bool?
+    @Parameter(title: "菜单") var choice: String?
+    @Parameter(title: "输入") var textValue: String?
+    static var parameterSummary: some ParameterSummary {
+        Summary("识别\(\.$text)并确认记账") { \.$ledger; \.$tags; \.$clearTags; \.$excluded }
+    }
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+        let config = RecognitionBillingFlow.configuration(ledger: ledger, tags: tags, clearTags: clearTags, excluded: excluded)
+        let saved = try await RecognitionBillingFlow.run(text: text, configuration: config, choose: { values, prompt in
+            try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
+        }, input: { prompt in try await $textValue.requestValue(IntentDialog(stringLiteral: prompt)) })
+        return .result(value: saved, dialog: try CustomBilling.result(saved))
+    }
+}
+
 #endif
