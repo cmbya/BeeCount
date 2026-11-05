@@ -48,7 +48,7 @@ class ShortcutService {
           final result = await store.commit(request);
           try {
             await PostProcessor.runC(container,
-                ledgerId: request.ledgerId, tags: true);
+                ledgerId: request.ledgerId, tags: true, attachments: request.attachment != null);
           } catch (_) {
             /* Post-commit refresh failure cannot undo a committed receipt. */
           }

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:beecount/cloud/sync/change_tracker.dart';
 import 'package:beecount/data/db.dart';
 import 'package:beecount/data/repositories/local/local_repository.dart';
@@ -447,4 +448,73 @@ void main() {
     await store.deleteRule('rule-a');
     expect(await store.rules(), isEmpty);
   });
+  test('optional screenshot attaches to every split row, replays once and rejects changed bytes', () async {
+    final directory = await Directory.systemTemp.createTemp('shortcut-attachment-test-');
+    final attachments = ShortcutStore(repo, attachmentDirectory: () async => directory);
+    try {
+      final data = payload();
+      data['attachment'] = {'dataBase64': base64Encode([137, 80, 78, 71, 13, 10, 26, 10]), 'extension': 'png'};
+      final request = ShortcutSubmission.fromJson(data);
+      expect((await attachments.commit(request, validateOnly: true))['status'], 'valid');
+      expect(directory.listSync(), isEmpty);
+      expect(await count('transaction_attachments'), 0);
+      final result = await attachments.commit(request);
+      expect(result['attachmentCount'], 3);
+      expect(await count('transaction_attachments'), 3);
+      expect(directory.listSync().whereType<File>(), hasLength(1));
+      final rows = await db.select(db.transactionAttachments).get();
+      expect(rows.map((r) => r.fileName).toSet(), {request.attachment!.fileName});
+      expect(File('${directory.path}/${request.attachment!.fileName}').readAsBytesSync(), request.attachment!.bytes);
+      expect((await attachments.commit(request))['replayed'], true);
+      expect(await count('transaction_attachments'), 3);
+      data['attachment'] = {'dataBase64': base64Encode([255, 216, 255, 217]), 'extension': 'jpg'};
+      await expectLater(attachments.commit(ShortcutSubmission.fromJson(data)), throwsA(failure('REQUEST_CONFLICT')));
+      expect(directory.listSync().whereType<File>(), hasLength(1));
+    } finally { await directory.delete(recursive: true); }
+  });
+
+  test('attachment association failure rolls back transaction tags receipt and new file', () async {
+    final directory = await Directory.systemTemp.createTemp('shortcut-attachment-rollback-');
+    final attachments = ShortcutStore(repo, attachmentDirectory: () async => directory);
+    try {
+      final data = payload();
+      data['attachment'] = {'dataBase64': base64Encode([137, 80, 78, 71]), 'extension': 'png'};
+      await db.customStatement("CREATE TRIGGER reject_shortcut_attachment BEFORE INSERT ON transaction_attachments BEGIN SELECT RAISE(ABORT, 'test failure'); END");
+      await expectLater(attachments.commit(ShortcutSubmission.fromJson(data)), throwsA(failure('COMMIT_FAILED')));
+      for (final table in ['transactions', 'transaction_tags', 'transaction_attachments', 'shortcut_groups', 'shortcut_receipts']) {
+        expect(await count(table), 0);
+      }
+      expect(directory.listSync(), isEmpty);
+    } finally { await directory.delete(recursive: true); }
+  });
+
+  test('receipt failure does not remove a reused attachment file', () async {
+    final directory = await Directory.systemTemp.createTemp('shortcut-attachment-reuse-');
+    final attachments = ShortcutStore(repo, attachmentDirectory: () async => directory);
+    try {
+      final data = payload();
+      data['attachment'] = {'dataBase64': base64Encode([137, 80, 78, 71]), 'extension': 'png'};
+      final request = ShortcutSubmission.fromJson(data);
+      await attachments.commit(request);
+      final second = payload()..['requestId'] = 'a8126f46-6ae1-44d0-bf00-b5ef3243913b';
+      second['attachment'] = data['attachment'];
+      await db.customStatement("CREATE TRIGGER reject_reused_receipt BEFORE INSERT ON shortcut_receipts BEGIN SELECT RAISE(ABORT, 'test failure'); END");
+      await expectLater(attachments.commit(ShortcutSubmission.fromJson(second)), throwsA(failure('COMMIT_FAILED')));
+      expect(await count('transactions'), 3);
+      expect(await count('transaction_attachments'), 3);
+      expect(File('${directory.path}/${request.attachment!.fileName}').existsSync(), true);
+    } finally { await directory.delete(recursive: true); }
+  });
+
+  test('invalid attachment fails before persistence', () {
+    for (final attachment in [
+      {'dataBase64': '', 'extension': 'png'},
+      {'dataBase64': 'not-base64!', 'extension': 'jpg'},
+      {'dataBase64': base64Encode([1]), 'extension': '../png'}
+    ]) {
+      final data = payload()..['attachment'] = attachment;
+      expect(() => ShortcutSubmission.fromJson(data), throwsA(failure('INVALID_ATTACHMENT')));
+    }
+  });
+
 }

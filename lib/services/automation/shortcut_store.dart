@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
 import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart' as d;
 import '../../data/db.dart';
@@ -9,7 +11,24 @@ import 'shortcut_schema.dart';
 class ShortcutStore {
   final LocalRepository repo;
   BeeDatabase get db => repo.db;
-  ShortcutStore(this.repo);
+  final Future<Directory> Function()? attachmentDirectory;
+  ShortcutStore(this.repo, {this.attachmentDirectory});
+
+  Future<Directory> _attachmentDirectory() async {
+    if (attachmentDirectory != null) return attachmentDirectory!();
+    final docs = await getApplicationDocumentsDirectory();
+    return Directory('${docs.path}/attachments');
+  }
+
+  Future<void> _cleanupCreated(File? file) async {
+    if (file == null) return;
+    try {
+      await db.transaction(() async {
+        final name = file.uri.pathSegments.last;
+        if (await repo.countAttachmentsByFileName(name) == 0 && file.existsSync()) file.deleteSync();
+      });
+    } catch (_) { /* Orphan-file maintenance may clean later; never undo a commit. */ }
+  }
 
   Future<Map<String, dynamic>> query(String requestId) async {
     final row = await db.customSelect(
@@ -27,6 +46,7 @@ class ShortcutStore {
   Future<Map<String, dynamic>> commit(ShortcutSubmission request,
       {bool validateOnly = false}) async {
     final digest = sha256.convert(utf8.encode(request.canonical)).toString();
+    File? createdFile;
     try {
       return await db.transaction(() async {
         final receipt = await db.customSelect(
@@ -105,6 +125,27 @@ class ShortcutStore {
               i: request.entries[i].tagIds
           },
         );
+        final attachment = request.attachment;
+        if (attachment != null) {
+          final directory = await _attachmentDirectory();
+          if (!directory.existsSync()) directory.createSync(recursive: true);
+          final file = File('${directory.path}/${attachment.fileName}');
+          if (file.existsSync()) {
+            if (sha256.convert(file.readAsBytesSync()).toString() != attachment.digest) {
+              throw const ShortcutFailure('INVALID_ATTACHMENT', '已有附件文件校验失败，未入账');
+            }
+          } else {
+            createdFile = file;
+            file.writeAsBytesSync(attachment.bytes, flush: true);
+          }
+          // Shared physical file, one attachment row for each split transaction.
+          // Repository also registers parent tx sync metadata in this transaction.
+          for (final id in ids) {
+            await repo.createAttachment(transactionId: id,
+                fileName: attachment.fileName, originalName: 'shortcut.${attachment.extension}',
+                fileSize: attachment.bytes.length, sortOrder: 0);
+          }
+        }
         final rows = await (db.select(db.transactions)
               ..where((t) => t.id.isIn(ids)))
             .get();
@@ -126,6 +167,7 @@ class ShortcutStore {
           'currency': ledger.currency,
           'minorDigits': shortcutCurrencyDigits(ledger.currency),
           'replayed': false,
+          'attachmentCount': attachment == null ? 0 : ids.length,
           'syncStatus': 'pending',
           'warnings': ['已在本机入账；云端状态请查看 App 同步状态，无需再次记账']
         };
@@ -139,8 +181,10 @@ class ShortcutStore {
         return result;
       });
     } on ShortcutFailure {
+      await _cleanupCreated(createdFile);
       rethrow;
     } catch (_) {
+      await _cleanupCreated(createdFile);
       throw const ShortcutFailure('COMMIT_FAILED', '保存失败，事务已回滚；可使用原请求重试');
     }
   }

@@ -1,6 +1,7 @@
 import Flutter
 import UIKit
 import XCTest
+import AppIntents
 @testable import Runner
 
 class RunnerTests: XCTestCase {
@@ -446,6 +447,38 @@ class RunnerTests: XCTestCase {
     let time = try XCTUnwrap(ISO8601DateFormatter().date(from: candidate["occurredAt"] as? String ?? ""))
     XCTAssertGreaterThanOrEqual(time, before)
     XCTAssertLessThanOrEqual(time, Date())
+  }
+
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testAllFiveActionsHaveIndependentOptionalAttachment() {
+    XCTAssertNil(ImageConfirmBillingIntent().attachment)
+    XCTAssertNil(TextConfirmBillingIntent().attachment)
+    XCTAssertNil(CustomExpenseBillingIntent().attachment)
+    XCTAssertNil(CustomIncomeBillingIntent().attachment)
+    XCTAssertNil(CustomTransferBillingIntent().attachment)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testShortcutAttachmentHonorsKeepOriginalSetting() throws {
+    let key = "flutter.attachmentKeepOriginal"
+    let old = UserDefaults.standard.object(forKey: key)
+    defer {
+      if let old { UserDefaults.standard.set(old, forKey: key) }
+      else { UserDefaults.standard.removeObject(forKey: key) }
+    }
+    let bytes = try screenshot(width: 100, height: 100)
+    let file = IntentFile(data: bytes, filename: "screenshot.png")
+    UserDefaults.standard.set(true, forKey: key)
+    let original = try ConfirmedBilling.attachmentPayload(file)
+    XCTAssertEqual(original["extension"] as? String, "png")
+    XCTAssertEqual(Data(base64Encoded: original["dataBase64"] as? String ?? ""), bytes)
+    UserDefaults.standard.set(false, forKey: key)
+    let compressed = try ConfirmedBilling.attachmentPayload(file)
+    XCTAssertEqual(compressed["extension"] as? String, "jpg")
+    XCTAssertNotNil(UIImage(data: try XCTUnwrap(Data(base64Encoded: compressed["dataBase64"] as? String ?? ""))))
   }
 
   private func screenshot(width: CGFloat, height: CGFloat) throws -> Data {

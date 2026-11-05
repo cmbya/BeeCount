@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
 
 class ShortcutFailure implements Exception {
   final String code;
@@ -107,6 +109,34 @@ class ShortcutEntry {
       };
 }
 
+
+/// Optional attachment. It enters the store only after final confirmation.
+class ShortcutAttachment {
+  final Uint8List bytes;
+  final String extension;
+  final String digest;
+  const ShortcutAttachment._(this.bytes, this.extension, this.digest);
+  factory ShortcutAttachment.fromJson(dynamic raw) {
+    if (raw is! Map<String, dynamic> || raw['dataBase64'] is! String ||
+        raw['extension'] is! String || (raw['dataBase64'] as String).length > 54_000_000) {
+      throw const ShortcutFailure('INVALID_ATTACHMENT', '附带图片格式无效或过大');
+    }
+    final ext = (raw['extension'] as String).toLowerCase();
+    if (!{'jpg', 'jpeg', 'png', 'heic', 'heif', 'gif', 'webp', 'tif', 'tiff', 'bmp'}.contains(ext)) {
+      throw const ShortcutFailure('INVALID_ATTACHMENT', '不支持的图片格式');
+    }
+    Uint8List bytes;
+    try { bytes = base64Decode(raw['dataBase64'] as String); }
+    catch (_) { throw const ShortcutFailure('INVALID_ATTACHMENT', '附带图片编码无效'); }
+    if (bytes.isEmpty || bytes.length > 40_000_000) {
+      throw const ShortcutFailure('INVALID_ATTACHMENT', '附带图片为空或超过 40 MB');
+    }
+    return ShortcutAttachment._(bytes, ext, sha256.convert(bytes).toString());
+  }
+  String get fileName => 'sha_$digest.$extension';
+  Map<String, dynamic> get identity => {'sha256': digest, 'extension': extension};
+}
+
 class ShortcutSubmission {
   final String type;
   final int? toAccountId;
@@ -117,8 +147,10 @@ class ShortcutSubmission {
   final DateTime occurredAt;
   final int originalAmountMinor;
   final List<ShortcutEntry> entries;
+  final ShortcutAttachment? attachment;
   const ShortcutSubmission(
       {required this.requestId,
+      this.attachment,
       this.type = 'expense',
       this.toAccountId,
       required this.currency,
@@ -181,7 +213,8 @@ class ShortcutSubmission {
         accountId: shortcutInt(json['accountId'], '账户'),
         occurredAt: date.toUtc(),
         originalAmountMinor: original,
-        entries: entries);
+        entries: entries,
+        attachment: json['attachment'] == null ? null : ShortcutAttachment.fromJson(json['attachment']));
   }
 
   /// Fixed key order, UTC time, sorted/deduplicated tags; display fields excluded.
@@ -195,7 +228,8 @@ class ShortcutSubmission {
         if (toAccountId != null) 'toAccountId': toAccountId,
         'occurredAt': occurredAt.toIso8601String(),
         'originalAmountMinor': originalAmountMinor,
-        'entries': entries.map((e) => e.toJson()).toList()
+        'entries': entries.map((e) => e.toJson()).toList(),
+        if (attachment != null) 'attachment': attachment!.identity
       });
 }
 

@@ -288,9 +288,41 @@ enum ConfirmedBilling {
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         return formatter.string(from: date)
     }
-    static func commit(_ submission: [String: Any]) async throws -> String {
+    // Attachment is independent from recognition. Encode only after confirmation;
+    // no permanent files or AI calls are made by this helper.
+    static func attachmentPayload(_ attachment: IntentFile) throws -> [String: Any] {
+        let data = try imageData(attachment)
+        guard UIImage(data: data) != nil,
+              let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            throw ShortcutBillingError(message: "附带图片无效，未入账")
+        }
+        let keepOriginal = UserDefaults.standard.bool(forKey: "flutter.attachmentKeepOriginal")
+        let bytes: Data
+        let ext: String
+        if keepOriginal {
+            bytes = data
+            let identifier = CGImageSourceGetType(source) as String?
+            ext = identifier.flatMap { UTType($0)?.preferredFilenameExtension } ?? "jpg"
+        } else {
+            guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: 1920,
+            ] as CFDictionary),
+                  let jpeg = UIImage(cgImage: thumbnail).jpegData(compressionQuality: 0.8) else {
+                throw ShortcutBillingError(message: "附件压缩失败，未入账")
+            }
+            bytes = jpeg
+            ext = "jpg"
+        }
+        guard bytes.count <= 40_000_000 else { throw ShortcutBillingError(message: "附带图片超过 40 MB，未入账") }
+        return ["dataBase64": bytes.base64EncodedString(), "extension": ext]
+    }
+    static func commit(_ submission: [String: Any], attachment: IntentFile? = nil) async throws -> String {
+        var submission = submission
         guard submission["confirmed"] as? Bool == true,
               let id = submission["requestId"] as? String else { throw ShortcutBillingError(message: "请先完成草稿确认") }
+        if let attachment { submission["attachment"] = try attachmentPayload(attachment) }
         // Only a request ID, no draft/notes/keys, survives interruption.
         UserDefaults.standard.set(id, forKey: "confirmedBillingLastRequestId")
         let response = try decode(await AppIntentsBridge.request(["operation": "commit", "submission": submission]))
@@ -835,10 +867,11 @@ struct CustomExpenseBillingIntent: AppIntent {
     @Parameter(title: "账户") var account: BillingAccount?
     @Parameter(title: "标签") var tags: [BillingTag]?
     @Parameter(title: "不计预算", default: false) var excluded: Bool
+    @Parameter(title: "附带图片", inputConnectionBehavior: .never) var attachment: IntentFile?
     @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
     @Parameter(title: "输入", default: "", inputConnectionBehavior: .never) var textValue: String
     static var parameterSummary: some ParameterSummary {
-        Summary("自定义支出账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$account; \.$tags; \.$excluded }
+        Summary("自定义支出账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$account; \.$tags; \.$excluded; \.$attachment }
     }
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
         let draft = try await CustomBilling.draft(type: "expense", ledger: ledger, category: category, amount: amount, date: date, note: note, account: account, destination: nil, tags: tags, excluded: excluded)
@@ -847,7 +880,7 @@ struct CustomExpenseBillingIntent: AppIntent {
         }, input: { prompt in textValue = ""
             return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
         let submission = try await editor.runEditor()
-        let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission))
+        let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission), attachment: attachment)
         return .result(value: saved, dialog: try CustomBilling.result(saved))
     }
 }
@@ -867,10 +900,11 @@ struct CustomIncomeBillingIntent: AppIntent {
     @Parameter(title: "备注") var note: String?
     @Parameter(title: "账户") var account: BillingAccount?
     @Parameter(title: "标签") var tags: [BillingTag]?
+    @Parameter(title: "附带图片", inputConnectionBehavior: .never) var attachment: IntentFile?
     @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
     @Parameter(title: "输入", default: "", inputConnectionBehavior: .never) var textValue: String
     static var parameterSummary: some ParameterSummary {
-        Summary("自定义收入账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$account; \.$tags }
+        Summary("自定义收入账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$account; \.$tags; \.$attachment }
     }
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
         let draft = try await CustomBilling.draft(type: "income", ledger: ledger, category: category, amount: amount, date: date, note: note, account: account, destination: nil, tags: tags, excluded: false)
@@ -879,7 +913,7 @@ struct CustomIncomeBillingIntent: AppIntent {
         }, input: { prompt in textValue = ""
             return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
         let submission = try await editor.runEditor()
-        let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission))
+        let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission), attachment: attachment)
         return .result(value: saved, dialog: try CustomBilling.result(saved))
     }
 }
@@ -899,10 +933,11 @@ struct CustomTransferBillingIntent: AppIntent {
     @Parameter(title: "转出账户") var account: BillingAccount?
     @Parameter(title: "转入账户") var destination: BillingAccount?
     @Parameter(title: "标签") var tags: [BillingTag]?
+    @Parameter(title: "附带图片", inputConnectionBehavior: .never) var attachment: IntentFile?
     @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
     @Parameter(title: "输入", default: "", inputConnectionBehavior: .never) var textValue: String
     static var parameterSummary: some ParameterSummary {
-        Summary("自定义转账账单") { \.$ledger; \.$amount; \.$date; \.$note; \.$account; \.$destination; \.$tags }
+        Summary("自定义转账账单") { \.$ledger; \.$amount; \.$date; \.$note; \.$account; \.$destination; \.$tags; \.$attachment }
     }
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
         let draft = try await CustomBilling.draft(type: "transfer", ledger: ledger, category: nil, amount: amount, date: date, note: note, account: account, destination: destination, tags: tags, excluded: false)
@@ -911,7 +946,7 @@ struct CustomTransferBillingIntent: AppIntent {
         }, input: { prompt in textValue = ""
             return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
         let submission = try await editor.runEditor()
-        let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission))
+        let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission), attachment: attachment)
         return .result(value: saved, dialog: try CustomBilling.result(saved))
     }
 }
@@ -989,6 +1024,7 @@ enum RecognitionBillingFlow {
 
     static func run(image: IntentFile? = nil, text: String? = nil,
                     configuration: [String: Any],
+                    attachment: IntentFile? = nil,
                     choose: @escaping ([String], String) async throws -> String,
                     input: @escaping (String) async throws -> String) async throws -> String {
         guard (image != nil) != (text != nil) else {
@@ -1024,7 +1060,7 @@ enum RecognitionBillingFlow {
         let editor = ConfirmedBillingEditor(draft: try ConfirmedBilling.encode(draft), choose: choose, input: input)
         // Cancellation exits before commit. Existing atomic/idempotent store is reused.
         let submission = try await editor.runEditor()
-        return try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission))
+        return try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission), attachment: attachment)
     }
 }
 
@@ -1038,14 +1074,15 @@ struct ImageConfirmBillingIntent: AppIntent {
     @Parameter(title: "标签（留空跟随 App）") var tags: [BillingTag]?
     @Parameter(title: "清空标签", default: false) var clearTags: Bool
     @Parameter(title: "不计预算（仅支出，留空跟随 App）") var excluded: Bool?
+    @Parameter(title: "附带图片", inputConnectionBehavior: .never) var attachment: IntentFile?
     @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
     @Parameter(title: "输入", default: "", inputConnectionBehavior: .never) var textValue: String
     static var parameterSummary: some ParameterSummary {
-        Summary("识别\(\.$image)并确认记账") { \.$ledger; \.$tags; \.$clearTags; \.$excluded }
+        Summary("识别\(\.$image)并确认记账") { \.$ledger; \.$tags; \.$clearTags; \.$excluded; \.$attachment }
     }
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
         let config = RecognitionBillingFlow.configuration(ledger: ledger, tags: tags, clearTags: clearTags, excluded: excluded)
-        let saved = try await RecognitionBillingFlow.run(image: image, configuration: config, choose: { values, prompt in
+        let saved = try await RecognitionBillingFlow.run(image: image, configuration: config, attachment: attachment, choose: { values, prompt in
             try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
         }, input: { prompt in textValue = ""
             return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
@@ -1063,14 +1100,15 @@ struct TextConfirmBillingIntent: AppIntent {
     @Parameter(title: "标签（留空跟随 App）") var tags: [BillingTag]?
     @Parameter(title: "清空标签", default: false) var clearTags: Bool
     @Parameter(title: "不计预算（仅支出，留空跟随 App）") var excluded: Bool?
+    @Parameter(title: "附带图片", inputConnectionBehavior: .never) var attachment: IntentFile?
     @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
     @Parameter(title: "输入", default: "", inputConnectionBehavior: .never) var textValue: String
     static var parameterSummary: some ParameterSummary {
-        Summary("识别\(\.$text)并确认记账") { \.$ledger; \.$tags; \.$clearTags; \.$excluded }
+        Summary("识别\(\.$text)并确认记账") { \.$ledger; \.$tags; \.$clearTags; \.$excluded; \.$attachment }
     }
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
         let config = RecognitionBillingFlow.configuration(ledger: ledger, tags: tags, clearTags: clearTags, excluded: excluded)
-        let saved = try await RecognitionBillingFlow.run(text: text, configuration: config, choose: { values, prompt in
+        let saved = try await RecognitionBillingFlow.run(text: text, configuration: config, attachment: attachment, choose: { values, prompt in
             try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
         }, input: { prompt in textValue = ""
             return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
