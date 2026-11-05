@@ -23,6 +23,45 @@ class RunnerTests: XCTestCase {
 
   @available(iOS 16.0, *)
   @MainActor
+  func testEditorRejectsOversizeSplitAndRecomputesAfterDelete() async throws {
+    var choices = ["拆分或新增明细", "开始拆分", "金额", "分类", "1. 餐饮", "完成此笔", "返回修改", "金额", "完成此笔",
+      "删除明细", "第 1 笔 80.00", "拆分或新增明细", "分类", "1. 餐饮", "完成此笔", "确认提交"]
+    var inputs = ["400", "80"]
+    var rejected = false
+    let editor = ConfirmedBillingEditor(draft: try editorDraft(), choose: { values, prompt in
+      if prompt.contains("超过剩余金额") { rejected = true }
+      let selected = choices.removeFirst(); XCTAssertTrue(values.contains(selected), selected); return selected
+    }, input: { _ in inputs.removeFirst() }, call: { request in
+      request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions()
+    })
+    let result = try ConfirmedBilling.decode(await editor.runEditor())
+    let entries = try XCTUnwrap(result["entries"] as? [[String: Any]])
+    XCTAssertTrue(rejected)
+    XCTAssertEqual(entries.count, 1)
+    XCTAssertEqual(entries[0]["amountMinor"] as? Int, 30000)
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testEditorIncomeSelectsIncomeCategoryWithoutBudgetMenu() async throws {
+    var choices = ["收支类型", "收入", "编辑明细", "第 1 笔 300.00", "分类", "1. 工资", "完成此笔", "确认提交"]
+    var incomeFields = false
+    let editor = ConfirmedBillingEditor(draft: try editorDraft(), choose: { values, _ in
+      if values.contains("完成此笔") { incomeFields = true; XCTAssertFalse(values.contains("预算标记")) }
+      let selected = choices.removeFirst(); XCTAssertTrue(values.contains(selected), selected); return selected
+    }, input: { _ in "" }, call: { request in
+      request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions(request["type"] as? String ?? "expense")
+    })
+    let result = try ConfirmedBilling.decode(await editor.runEditor())
+    XCTAssertTrue(incomeFields)
+    XCTAssertEqual(result["type"] as? String, "income")
+    XCTAssertEqual((result["entries"] as? [[String: Any]])?.first?["categoryId"] as? Int, 20)
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
   func testEditorSplitsAndSummarizesWithoutSaving() async throws {
     var choices = ["拆分或新增明细", "开始拆分", "金额", "分类", "1. 餐饮", "完成此笔",
       "拆分或新增明细", "金额", "分类", "1. 餐饮", "预算标记", "不计入预算", "完成此笔",

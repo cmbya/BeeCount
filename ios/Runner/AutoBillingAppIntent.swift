@@ -383,13 +383,17 @@ final class ConfirmedBillingEditor {
         guard let index = labels.firstIndex(of: selected), let id = values[index]["id"] as? Int else { throw ShortcutBillingError(message: "选项已失效") }
         return id
     }
-    @MainActor private func edit(_ initial: [String: Any], categories: [[String: Any]], tags: [[String: Any]], digits: Int, type: String) async throws -> [String: Any] {
+    @MainActor private func edit(_ initial: [String: Any], categories: [[String: Any]], tags: [[String: Any]], digits: Int, type: String, maximum: Int? = nil) async throws -> [String: Any] {
         var entry = initial
         while true {
             let fields = ["完成此笔", "金额"] + (type == "transfer" ? [] : ["分类"]) + ["备注", "标签"] + (type == "expense" ? ["预算标记"] : []) + ["取消本次字段修改"]
             let selected = try await choose(fields, ConfirmedBilling.summary(entry, categories: categories, tags: tags, digits: digits, type: type))
             switch selected {
             case "完成此笔":
+                if let maximum, (entry["amountMinor"] as? Int ?? 0) > maximum {
+                    _ = try await choose(["返回修改"], "此笔超过剩余金额 " + ConfirmedBilling.money(maximum, digits: digits) + "，请修改金额")
+                    continue
+                }
                 guard (entry["amountMinor"] as? Int ?? 0) > 0, (type == "transfer" || categories.contains(where: { $0["id"] as? Int == entry["categoryId"] as? Int })) else { _ = try await choose(["返回修改"], "请输入正金额并选择有效分类"); continue }
                 return entry
             case "金额":
@@ -535,7 +539,10 @@ final class ConfirmedBillingEditor {
                 if type == "transfer" { toAccountId = try await pick(accounts.filter { $0["id"] as? Int != accountId }, "选择转入账户") }
             case "日期时间":
                 let value = try await input("当前 " + time + "；输入完整日期时间，如 2026-11-05T18:30:00+08:00")
-                if ISO8601DateFormatter().date(from: value) != nil { time = value }
+                let formatter = ISO8601DateFormatter()
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                if ISO8601DateFormatter().date(from: value) != nil || formatter.date(from: value) != nil { time = value }
+                else { _ = try await choose(["返回修改"], "日期时间格式无效，请输入带时区的完整日期时间") }
             case "修改原付款金额":
                 if let amount = try? ConfirmedBilling.minor(await input("输入原付款总额"), digits: digits) { total = amount; if !didSplit && entries.count == 1 { entries[0]["amountMinor"] = amount } }
             case "拆分或新增明细":
@@ -547,7 +554,7 @@ final class ConfirmedBillingEditor {
                 let remaining = total - entries.reduce(0) { $0 + ($1["amountMinor"] as? Int ?? 0) }
                 guard remaining > 0 else { continue }
                 var entry: [String: Any] = ["amountMinor": remaining, "note": candidate["note"] as? String ?? "", "tagIds": candidate["tagIds"] as? [Int] ?? defaults["tagIds"] as? [Int] ?? [], "excludeFromBudget": candidate["excludeFromBudget"] as? Bool ?? defaults["excludeFromBudget"] as? Bool ?? false]
-                entry = try await edit(entry, categories: categories, tags: tags, digits: digits, type: type)
+                entry = try await edit(entry, categories: categories, tags: tags, digits: digits, type: type, maximum: remaining)
                 if (entry["amountMinor"] as? Int ?? 0) <= remaining && entry["categoryId"] is Int { entries.append(entry) }
             case "编辑明细", "删除明细":
                 guard !entries.isEmpty else { continue }

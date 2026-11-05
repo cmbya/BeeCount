@@ -10,6 +10,47 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
+  testWidgets('editing stale ledger scope requires an explicit valid selection',
+      (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final db = BeeDatabase.forTesting(NativeDatabase.memory());
+    final repo = LocalRepository(db);
+    addTearDown(db.close);
+    final ledger = await repo.createLedger(name: '个人账本');
+    final category = await repo.createCategory(name: '餐饮', kind: 'expense');
+    await ShortcutStore(repo).saveRule({
+      'id': 'stale',
+      'name': '失效账本规则',
+      'keyword': '咖啡',
+      'enabled': 0,
+      'field': 'merchant',
+      'match_mode': 'contains',
+      'ledger_id': 9999,
+      'category_id': category,
+      'priority': 0
+    });
+    tester.view.physicalSize = const Size(1000, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(ProviderScope(
+        overrides: [repositoryProvider.overrideWithValue(repo)],
+        child: const MaterialApp(home: ShortcutBillingPage())));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('失效账本规则'));
+    await tester.pumpAndSettle();
+    expect(find.text('原账本已失效，请重新选择'), findsOneWidget);
+    await tester.tap(find.text('账本范围'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('个人账本').last);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect((await ShortcutStore(repo).rules()).single['ledger_id'], ledger);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
       'personal rules can be created, disabled, edited and deleted in App',
       (tester) async {

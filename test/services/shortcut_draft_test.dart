@@ -134,6 +134,44 @@ void main() {
     expect(await db.select(db.transactions).get(), isEmpty);
   });
 
+  test(
+      'stale rule warns, can be disabled, and valuation accounts are unavailable',
+      () async {
+    final store = ShortcutStore(repo);
+    final rule = <String, dynamic>{
+      'id': 'stale',
+      'name': '失效规则',
+      'enabled': 1,
+      'ledger_id': ledger,
+      'field': 'merchant',
+      'match_mode': 'contains',
+      'keyword': '咖啡',
+      'category_id': category,
+      'priority': 9
+    };
+    await store.saveRule(rule);
+    await db.customStatement('DELETE FROM categories WHERE id = ?', [category]);
+    final valuation = await repo.createAccount(
+        ledgerId: ledger, name: '房产', type: 'real_estate');
+    final service = ShortcutService(container,
+        extract: (_, __) async => jsonEncode([
+              {'type': 'expense', 'amount': '10', 'merchant': '咖啡'}
+            ]));
+    final options = await service.options(ledger);
+    expect((options['accounts'] as List).where((a) => a['id'] == valuation),
+        isEmpty);
+    final result = await service.handle({
+      'operation': 'recognize',
+      'mode': 'text',
+      'text': '咖啡10元',
+      'ledgerId': ledger
+    });
+    expect(result['candidates'][0]['warnings'], contains('个人规则目标分类已失效'));
+    expect(result['candidates'][0]['categoryId'], isNull);
+    await store.saveRule({...rule, 'enabled': 0});
+    expect((await store.rules()).single['enabled'], 0);
+  });
+
   test('v33 migration preserves old transactions and can safely rerun',
       () async {
     await db.customStatement(

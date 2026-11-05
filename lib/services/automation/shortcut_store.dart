@@ -3,6 +3,7 @@ import 'package:crypto/crypto.dart';
 import 'package:drift/drift.dart' as d;
 import '../../data/db.dart';
 import '../../data/repositories/local/local_repository.dart';
+import '../../utils/account_type_utils.dart';
 import 'shortcut_schema.dart';
 
 class ShortcutStore {
@@ -52,6 +53,7 @@ class ShortcutStore {
             ledger.currency.toUpperCase() != request.currency ||
             account == null ||
             account.hidden ||
+            !isTradableType(account.type) ||
             account.currency.toUpperCase() != ledger.currency.toUpperCase()) {
           throw const ShortcutFailure('INVALID_REFERENCE', '请选择个人账本及同币种的有效账户');
         }
@@ -61,6 +63,7 @@ class ShortcutStore {
           final destination = await repo.getAccount(request.toAccountId!);
           if (destination == null ||
               destination.hidden ||
+              !isTradableType(destination.type) ||
               destination.id == account.id ||
               destination.currency.toUpperCase() != request.currency) {
             throw const ShortcutFailure('INVALID_REFERENCE', '请选择不同的有效同币种转入账户');
@@ -160,13 +163,13 @@ class ShortcutStore {
       ...await repo.getUsableCategories('expense'),
       ...await repo.getUsableCategories('income')
     ];
-    if (rule['ledger_id'] != null) {
+    if (rule['enabled'] != 0 && rule['ledger_id'] != null) {
       final ledger = await repo.getLedgerById(rule['ledger_id'] as int);
       if (ledger == null || ledger.isShared || ledger.type != 'personal') {
         throw const ShortcutFailure('INVALID_REFERENCE', '规则账本已失效');
       }
     }
-    if (!cats.any((c) => c.id == rule['category_id'])) {
+    if (rule['enabled'] != 0 && !cats.any((c) => c.id == rule['category_id'])) {
       throw const ShortcutFailure('INVALID_REFERENCE', '请选择有效的收入或支出分类');
     }
     await db.customStatement(

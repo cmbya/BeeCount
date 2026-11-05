@@ -74,6 +74,15 @@ void main() {
   Matcher failure(String code) =>
       isA<ShortcutFailure>().having((e) => e.code, 'code', code);
 
+  test('valuation account cannot receive shortcut transactions', () async {
+    final valuation = await repo.createAccount(
+        ledgerId: ledger, name: '房产', type: 'real_estate');
+    final data = payload()..['accountId'] = valuation;
+    await expectLater(store.commit(ShortcutSubmission.fromJson(data)),
+        throwsA(failure('INVALID_REFERENCE')));
+    expect(await count('transactions'), 0);
+  });
+
   test(
       'existing JSON backup round trip preserves split rows, tags and budget flags',
       () async {

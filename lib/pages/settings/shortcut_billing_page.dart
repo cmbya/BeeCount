@@ -10,6 +10,7 @@ import '../../providers.dart';
 import '../../services/automation/shortcut_service.dart';
 import '../../services/automation/shortcut_store.dart';
 import '../../services/automation/shortcut_schema.dart';
+import '../../utils/account_type_utils.dart';
 
 /// Personal shortcut settings. Rules are local and intentionally not cloud synced.
 class ShortcutBillingPage extends ConsumerStatefulWidget {
@@ -42,7 +43,9 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
     ledgers = (await repo.getAllLedgers())
         .where((l) => !l.isShared && l.type == 'personal')
         .toList();
-    accounts = (await repo.getAllAccounts()).where((a) => !a.hidden).toList();
+    accounts = (await repo.getAllAccounts())
+        .where((a) => !a.hidden && isTradableType(a.type))
+        .toList();
     categories = [
       ...await repo.getUsableCategories('expense'),
       ...await repo.getUsableCategories('income')
@@ -88,7 +91,10 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
     int? ledgerId = existing?['ledger_id'] as int?;
     var categoryId = existing?['category_id'] as int?;
     if (!categories.any((c) => c.id == categoryId)) categoryId = null;
-    if (!ledgers.any((l) => l.id == ledgerId)) ledgerId = null;
+    final invalidLedgerId =
+        ledgerId != null && !ledgers.any((l) => l.id == ledgerId)
+            ? ledgerId
+            : null;
     var enabled = existing?['enabled'] != 0;
     String? error;
     final route = DialogRoute<void>(
@@ -140,6 +146,10 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                             items: [
                               const DropdownMenuItem(
                                   value: 0, child: Text('所有个人账本')),
+                              if (invalidLedgerId != null)
+                                DropdownMenuItem(
+                                    value: invalidLedgerId,
+                                    child: const Text('原账本已失效，请重新选择')),
                               ...ledgers.map((l) => DropdownMenuItem(
                                   value: l.id, child: Text(l.name)))
                             ],
@@ -337,11 +347,16 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                         rule['priority'].toString()),
                     leading: Switch(
                         value: rule['enabled'] == 1,
-                        onChanged: validCats.contains(rule['category_id'])
+                        onChanged: validCats.contains(rule['category_id']) ||
+                                rule['enabled'] == 1
                             ? (v) async {
-                                await store
-                                    .saveRule({...rule, 'enabled': v ? 1 : 0});
-                                refresh();
+                                try {
+                                  await store.saveRule(
+                                      {...rule, 'enabled': v ? 1 : 0});
+                                  refresh();
+                                } on ShortcutFailure catch (e) {
+                                  if (mounted) message(e.message);
+                                }
                               }
                             : null),
                     onTap: () => editRule(rule),

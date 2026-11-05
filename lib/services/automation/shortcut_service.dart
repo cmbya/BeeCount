@@ -9,6 +9,7 @@ import '../../providers.dart';
 import '../billing/category_matcher.dart';
 import '../billing/post_processor.dart';
 import '../system/logger_service.dart';
+import '../../utils/account_type_utils.dart';
 import 'shortcut_schema.dart';
 import 'shortcut_store.dart';
 
@@ -91,6 +92,7 @@ class ShortcutService {
     final accounts = (await repo.getAllAccounts())
         .where((a) =>
             !a.hidden &&
+            isTradableType(a.type) &&
             a.currency.toUpperCase() == ledger.currency.toUpperCase())
         .toList();
     final cats =
@@ -203,6 +205,8 @@ class ShortcutService {
       final merchant =
           value['merchant'] is String ? value['merchant'] as String : '';
       final warnings = <String>[
+        if (!['expense', 'income', 'transfer'].contains(value['type']))
+          '未识别到有效收支类型，暂按支出展示，请人工核对',
         if (value['warnings'] is List)
           ...(value['warnings'] as List).whereType<String>()
       ];
@@ -218,8 +222,10 @@ class ShortcutService {
         warnings.add('识别币种与账本不一致，请核对后人工填写');
       int? categoryId;
       for (final rule in rules) {
-        if (rule['enabled'] != 1 ||
-            !usable.any((c) => c.id == rule['category_id']) ||
+        if (type == 'transfer' ||
+            rule['enabled'] != 1 ||
+            allUsable
+                .any((c) => c.id == rule['category_id'] && c.kind != type) ||
             (rule['ledger_id'] != null &&
                 rule['ledger_id'] != opts['ledgerId'])) continue;
         final source = switch (rule['field']) {
