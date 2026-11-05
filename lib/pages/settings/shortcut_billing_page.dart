@@ -88,7 +88,7 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
     if (!ledgers.any((l) => l.id == ledgerId)) ledgerId = null;
     var enabled = existing?['enabled'] != 0;
     String? error;
-    await showDialog<void>(
+    final route = DialogRoute<void>(
         context: context,
         builder: (ctx) => StatefulBuilder(
             builder: (ctx, update) => AlertDialog(
@@ -200,6 +200,8 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                         child: const Text('保存'))
                   ],
                 )));
+    await Navigator.of(context).push(route);
+    await route.completed;
     name.dispose();
     keyword.dispose();
     priority.dispose();

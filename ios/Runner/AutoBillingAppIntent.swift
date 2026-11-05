@@ -404,6 +404,9 @@ struct EditBillingDraftIntent: AppIntent {
         let options = try await ConfirmedBilling.call(["operation": "options", "ledgerId": ledgerId])
         let digits = options["minorDigits"] as? Int ?? 2
         let currency = options["currency"] as? String ?? "CNY"
+        if let originalCurrency = source["currency"] as? String, originalCurrency != currency {
+            throw ShortcutBillingError(message: "账本币种在识别后发生变化，请重新生成草稿")
+        }
         let categories = options["categories"] as? [[String: Any]] ?? []
         let accounts = options["accounts"] as? [[String: Any]] ?? []
         let tags = options["tags"] as? [[String: Any]] ?? []
@@ -471,7 +474,7 @@ struct EditBillingDraftIntent: AppIntent {
                     (entry["amountMinor"] as? Int ?? 0) > 0 && categories.contains { $0["id"] as? Int == entry["categoryId"] as? Int }
                 }) else { _ = try await choose(["返回修改"], "金额尚未分配完、超额或分类未选择，不能提交"); continue }
                 let submission: [String: Any] = ["schemaVersion": 1, "confirmed": true, "requestId": source["requestId"] as? String ?? UUID().uuidString,
-                    "ledgerId": ledgerId, "accountId": accountId!, "type": "expense", "occurredAt": time,
+                    "ledgerId": ledgerId, "accountId": accountId!, "currency": currency, "type": "expense", "occurredAt": time,
                     "originalAmountMinor": total, "entries": entries]
                 return try ConfirmedBilling.encode(submission)
             default: break

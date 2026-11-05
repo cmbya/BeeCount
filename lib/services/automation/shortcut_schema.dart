@@ -105,6 +105,7 @@ class ShortcutEntry {
 }
 
 class ShortcutSubmission {
+  final String currency;
   final String requestId;
   final int ledgerId;
   final int accountId;
@@ -113,6 +114,7 @@ class ShortcutSubmission {
   final List<ShortcutEntry> entries;
   const ShortcutSubmission(
       {required this.requestId,
+      required this.currency,
       required this.ledgerId,
       required this.accountId,
       required this.occurredAt,
@@ -124,6 +126,8 @@ class ShortcutSubmission {
     final raw = json['entries'];
     final time = json['occurredAt'];
     if (json['schemaVersion'] != 1 ||
+        json['currency'] is! String ||
+        !RegExp(r'^[A-Z]{3}$').hasMatch(json['currency'] as String) ||
         json['type'] != 'expense' ||
         json['confirmed'] != true ||
         id is! String ||
@@ -150,6 +154,7 @@ class ShortcutSubmission {
       throw const ShortcutFailure('INVALID_AMOUNT', '明细合计必须等于原付款');
     }
     return ShortcutSubmission(
+        currency: json['currency'] as String,
         requestId: id.toLowerCase(),
         ledgerId: shortcutInt(json['ledgerId'], '账本'),
         accountId: shortcutInt(json['accountId'], '账户'),
@@ -161,6 +166,7 @@ class ShortcutSubmission {
   /// Fixed key order, UTC time, sorted/deduplicated tags; display fields excluded.
   String get canonical => jsonEncode({
         'schemaVersion': 1,
+        'currency': currency,
         'requestId': requestId,
         'ledgerId': ledgerId,
         'accountId': accountId,

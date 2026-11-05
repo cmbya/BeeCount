@@ -30,8 +30,17 @@ jobs:
           lib/pages/settings/shortcut_billing_page.dart
           test/services/shortcut_billing_test.dart
           test/services/shortcut_draft_test.dart
+          test/services/shortcut_settings_test.dart
       - name: Verify transactions and idempotency
-        run: flutter test --no-pub test/services/shortcut_billing_test.dart test/services/shortcut_draft_test.dart
+        run: >-
+          flutter test --no-pub
+          test/services/shortcut_billing_test.dart
+          test/services/shortcut_draft_test.dart
+          test/services/shortcut_settings_test.dart
+          test/repositories/budget_exclude_flags_test.dart
+          test/repositories/tag_stats_range_test.dart
+          test/data/repositories/local_repository_bulk_sync_test.dart
+          test/sync/transaction_exclude_flags_apply_test.dart
       - name: Build unsigned iOS app
         run: flutter build ios --release --no-codesign --build-name=3.9.0 --build-number=$GITHUB_RUN_NUMBER
       - name: Package unsigned IPA for personal signing

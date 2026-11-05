@@ -35,6 +35,7 @@ void main() {
 
   Map<String, dynamic> payload() => {
         'schemaVersion': 1,
+        'currency': 'CNY',
         'confirmed': true,
         'requestId': requestId,
         'ledgerId': ledger,
@@ -86,6 +87,7 @@ void main() {
                   ? '00000002'
                   : '00000003');
       data['ledgerId'] = id;
+      data['currency'] = currency;
       data['accountId'] = a;
       final result = await store.commit(ShortcutSubmission.fromJson(data));
       final digits = shortcutCurrencyDigits(currency);

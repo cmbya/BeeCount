@@ -48,6 +48,7 @@ class ShortcutStore {
         if (ledger == null ||
             ledger.isShared ||
             ledger.type != 'personal' ||
+            ledger.currency.toUpperCase() != request.currency ||
             account == null ||
             account.hidden ||
             account.currency.toUpperCase() != ledger.currency.toUpperCase()) {

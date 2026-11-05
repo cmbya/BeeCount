@@ -243,6 +243,7 @@ class ShortcutService {
     }
     return {
       'status': 'draft',
+      'currency': opts['currency'],
       'requestId': const Uuid().v4(),
       'ledgerId': opts['ledgerId'],
       'options': opts,
