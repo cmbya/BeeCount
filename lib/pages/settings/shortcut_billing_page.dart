@@ -40,12 +40,9 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
   Future<void> load() async {
     final repo = ref.read(repositoryProvider);
     ledgers = (await repo.getAllLedgers())
-        .where(
-            (l) => !l.isShared && l.type == 'personal' && l.currency == 'CNY')
+        .where((l) => !l.isShared && l.type == 'personal')
         .toList();
-    accounts = (await repo.getAllAccounts())
-        .where((a) => !a.hidden && a.currency == 'CNY')
-        .toList();
+    accounts = (await repo.getAllAccounts()).where((a) => !a.hidden).toList();
     categories = await repo.getUsableCategories('expense');
     tags = await repo.getAllTags();
     rules = await store.rules();
@@ -232,7 +229,7 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                     style:
                         TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                 const Text(
-                    '支出可拆分后一次提交，取消不入账。首版支持人民币个人账本与同币种账户。原截图自动记账入口保持原行为。'),
+                    '支出可拆分后一次提交，取消不入账。支持个人账本与同币种账户，金额精度跟随账本。原截图自动记账入口保持原行为。'),
                 const SizedBox(height: 16),
                 DropdownButtonFormField<int>(
                     value:

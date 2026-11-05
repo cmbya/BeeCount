@@ -10,6 +10,37 @@ class ShortcutFailure implements Exception {
 
 const maxShortcutMinor = 999999999999;
 
+/// ISO 4217 minor-unit precision; currency follows the ledger, never a menu.
+int shortcutCurrencyDigits(String currency) {
+  final code = currency.toUpperCase();
+  if (const {
+    'BIF',
+    'CLP',
+    'DJF',
+    'GNF',
+    'ISK',
+    'JPY',
+    'KMF',
+    'KRW',
+    'PYG',
+    'RWF',
+    'UGX',
+    'UYI',
+    'VND',
+    'VUV',
+    'XAF',
+    'XOF',
+    'XPF'
+  }.contains(code)) {
+    return 0;
+  }
+  if (const {'BHD', 'IQD', 'JOD', 'KWD', 'LYD', 'OMR', 'TND'}.contains(code)) {
+    return 3;
+  }
+  if (const {'CLF', 'UYW'}.contains(code)) return 4;
+  return 2;
+}
+
 int shortcutInt(dynamic value, String field) {
   if (value is! int || value <= 0 || value > maxShortcutMinor) {
     throw ShortcutFailure('INVALID_AMOUNT', '$field 必须是有效的正整数');
@@ -20,13 +51,16 @@ int shortcutInt(dynamic value, String field) {
 /// Decimal text -> minor units without a floating point intermediate.
 int parseShortcutAmount(String text, {int digits = 2}) {
   final parts = text.trim().split('.');
-  if (parts.length > 2 ||
+  if (text.length > 32 ||
+      digits < 0 ||
+      digits > 4 ||
+      parts.length > 2 ||
       parts.any((s) => s.isEmpty || s.codeUnits.any((c) => c < 48 || c > 57)) ||
       (parts.length == 2 && parts[1].length > digits)) {
     throw const ShortcutFailure('INVALID_AMOUNT', '金额格式或小数位数无效');
   }
   return shortcutInt(
-      int.parse(
+      int.tryParse(
           parts[0] + (parts.length == 2 ? parts[1] : '').padRight(digits, '0')),
       '金额');
 }
@@ -102,7 +136,7 @@ class ShortcutSubmission {
         !RegExp(r'(Z|[+-][0-9]{2}:[0-9]{2})$').hasMatch(time)) {
       throw const ShortcutFailure('INVALID_REQUEST', '请完成确认；协议、请求 ID、日期或明细无效');
     }
-    final date = DateTime.tryParse(time);
+    final date = parseShortcutDate(time);
     if (date == null || date.year < 2000 || date.year > 2200) {
       throw const ShortcutFailure('INVALID_REQUEST', '日期时间无效');
     }
@@ -135,4 +169,26 @@ class ShortcutSubmission {
         'originalAmountMinor': originalAmountMinor,
         'entries': entries.map((e) => e.toJson()).toList()
       });
+}
+
+/// DateTime.parse normalizes impossible dates; reject them before conversion.
+DateTime? parseShortcutDate(String time) {
+  final m = RegExp(
+          r'^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,6})?(Z|[+-](\d{2}):(\d{2}))$')
+      .firstMatch(time);
+  if (m == null) return null;
+  final year = int.parse(m[1]!);
+  final month = int.parse(m[2]!);
+  final day = int.parse(m[3]!);
+  if (month < 1 ||
+      month > 12 ||
+      day < 1 ||
+      day > DateTime.utc(year, month + 1, 0).day ||
+      int.parse(m[4]!) > 23 ||
+      int.parse(m[5]!) > 59 ||
+      int.parse(m[6]!) > 59 ||
+      int.parse(m[8] ?? '0') > 14 ||
+      int.parse(m[9] ?? '0') > 59 ||
+      (m[8] == '14' && m[9] != '00')) return null;
+  return DateTime.tryParse(time);
 }

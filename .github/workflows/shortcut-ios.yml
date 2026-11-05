@@ -29,8 +29,9 @@ jobs:
           lib/services/automation/shortcut_service.dart
           lib/pages/settings/shortcut_billing_page.dart
           test/services/shortcut_billing_test.dart
+          test/services/shortcut_draft_test.dart
       - name: Verify transactions and idempotency
-        run: flutter test --no-pub test/services/shortcut_billing_test.dart
+        run: flutter test --no-pub test/services/shortcut_billing_test.dart test/services/shortcut_draft_test.dart
       - name: Build unsigned iOS app
         run: flutter build ios --release --no-codesign --build-name=3.9.0 --build-number=$GITHUB_RUN_NUMBER
       - name: Package unsigned IPA for personal signing

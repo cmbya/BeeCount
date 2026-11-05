@@ -1,5 +1,7 @@
 # 蜜蜂记账(BeeCount) &nbsp; [English](README_EN.md)
 
+> 本个人 fork 新增 [iOS 快捷确认记账说明](docs/ios-shortcut-billing.md)：图片/OCR 草稿、系统菜单编辑、手动拆分、一次确认入账与可视化个人规则。安装包见本仓库 iOS Shortcut Billing Actions 附件（未签名，待目标真机验收）。
+
 > 🧪 **[4.x 内测：下载 Android 安装包、查看注意事项与反馈问题](https://github.com/TNT-Likely/BeeCount/issues/580)**
 
 <div align="center">

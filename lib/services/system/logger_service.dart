@@ -139,6 +139,13 @@ class LogEntry {
 
 /// 日志服务
 class LoggerService {
+  static final Object _privateOperation = Object();
+
+  /// Keep sensitive request/response data out of both persisted and debug logs.
+  /// Zones scope this to one operation, including its asynchronous callbacks.
+  static Future<T> withoutLogging<T>(Future<T> Function() operation) =>
+      runZoned(operation, zoneValues: {_privateOperation: true});
+
   static final LoggerService _instance = LoggerService._internal();
   factory LoggerService() => _instance;
   LoggerService._internal() {
@@ -187,6 +194,7 @@ class LoggerService {
 
   /// 添加日志
   void _addLog(LogEntry entry) {
+    if (Zone.current[_privateOperation] == true) return;
     // 确保已加载
     if (!_isLoaded) {
       _loadLogs();
@@ -311,7 +319,8 @@ class LoggerService {
   }
 
   /// Error 日志
-  void error(String tag, String message, [dynamic error, StackTrace? stackTrace]) {
+  void error(String tag, String message,
+      [dynamic error, StackTrace? stackTrace]) {
     _addLog(LogEntry(
       timestamp: DateTime.now(),
       level: LogLevel.error,

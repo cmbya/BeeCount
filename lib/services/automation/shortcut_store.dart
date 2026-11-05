@@ -53,9 +53,8 @@ class ShortcutStore {
             account.currency.toUpperCase() != ledger.currency.toUpperCase()) {
           throw const ShortcutFailure('INVALID_REFERENCE', '请选择个人账本及同币种的有效账户');
         }
-        if (ledger.currency.toUpperCase() != 'CNY') {
-          throw const ShortcutFailure('UNSUPPORTED_CURRENCY', '快捷记账首版仅支持人民币账本');
-        }
+        final scale =
+            [1, 10, 100, 1000, 10000][shortcutCurrencyDigits(ledger.currency)];
         final categoryIds = (await repo.getUsableCategories('expense'))
             .map((c) => c.id)
             .toSet();
@@ -71,13 +70,13 @@ class ShortcutStore {
               .map((e) => TransactionsCompanion.insert(
                     ledgerId: request.ledgerId,
                     type: 'expense',
-                    amount: e.amountMinor / 100,
+                    amount: e.amountMinor / scale,
                     categoryId: d.Value(e.categoryId),
                     accountId: d.Value(request.accountId),
                     happenedAt: d.Value(request.occurredAt),
                     note: d.Value(e.note),
                     currencyCode: d.Value(ledger.currency),
-                    nativeAmount: d.Value(e.amountMinor / 100),
+                    nativeAmount: d.Value(e.amountMinor / scale),
                     excludeFromBudget: d.Value(e.excludeFromBudget),
                   ))
               .toList(),
@@ -103,6 +102,8 @@ class ShortcutStore {
           'transactionIds': ids,
           'count': ids.length,
           'totalAmountMinor': request.originalAmountMinor,
+          'currency': ledger.currency,
+          'minorDigits': shortcutCurrencyDigits(ledger.currency),
           'replayed': false,
           'syncStatus': 'pending',
           'warnings': ['已在本机入账；云端状态请查看 App 同步状态，无需再次记账']
@@ -138,6 +139,12 @@ class ShortcutStore {
       throw const ShortcutFailure('INVALID_RULE', '请填写规则名称、关键词及有效匹配方式');
     }
     final cats = await repo.getUsableCategories('expense');
+    if (rule['ledger_id'] != null) {
+      final ledger = await repo.getLedgerById(rule['ledger_id'] as int);
+      if (ledger == null || ledger.isShared || ledger.type != 'personal') {
+        throw const ShortcutFailure('INVALID_REFERENCE', '规则账本已失效');
+      }
+    }
     if (!cats.any((c) => c.id == rule['category_id'])) {
       throw const ShortcutFailure('INVALID_REFERENCE', '请选择有效支出分类');
     }

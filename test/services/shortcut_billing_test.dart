@@ -72,6 +72,48 @@ void main() {
   Matcher failure(String code) =>
       isA<ShortcutFailure>().having((e) => e.code, 'code', code);
 
+  test('ledger precision drives committed native amounts', () async {
+    for (final currency in ['JPY', 'KWD', 'USD']) {
+      final id = await repo.createLedger(name: currency, currency: currency);
+      final a = await repo.createAccount(
+          ledgerId: id, name: currency, currency: currency);
+      final data = payload();
+      data['requestId'] = requestId.replaceFirst(
+          '7f1a7e00',
+          currency == 'JPY'
+              ? '00000001'
+              : currency == 'KWD'
+                  ? '00000002'
+                  : '00000003');
+      data['ledgerId'] = id;
+      data['accountId'] = a;
+      final result = await store.commit(ShortcutSubmission.fromJson(data));
+      final digits = shortcutCurrencyDigits(currency);
+      expect(result['minorDigits'], digits);
+      expect(result['currency'], currency);
+      expect(await repo.getAccountBalance(a),
+          -30000 / [1, 10, 100, 1000, 10000][digits]);
+    }
+  });
+
+  test('reject impossible dates and oversized decimal strings', () {
+    for (final time in [
+      '2026-02-30T18:30:00+08:00',
+      '2026-01-01T24:30:00Z',
+      '2026-01-01T12:00:00+14:30'
+    ]) {
+      final data = payload()..['occurredAt'] = time;
+      expect(() => ShortcutSubmission.fromJson(data),
+          throwsA(failure('INVALID_REQUEST')));
+    }
+    expect(() => parseShortcutAmount('9' * 100),
+        throwsA(failure('INVALID_AMOUNT')));
+    expect(parseShortcutAmount('12', digits: 0), 12);
+    expect(() => parseShortcutAmount('12.3', digits: 0),
+        throwsA(failure('INVALID_AMOUNT')));
+    expect(parseShortcutAmount('1.234', digits: 3), 1234);
+  });
+
   test(
       '300 split: three rows, account -300, budget 150, tags 220/80, no original payment',
       () async {
