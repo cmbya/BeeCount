@@ -16,7 +16,7 @@ on:
     paths: [".github/workflows/shortcut-release.yml"]
 
 permissions:
-  actions: read
+  actions: write
   contents: write
 
 concurrency:
@@ -86,12 +86,12 @@ jobs:
           此包来自已完成 iOS Release 编译的原始构建，没有重新编译。按要求编译和打包后直接发布，不等待自动化测试。目标 iPhone 17 / iOS 27.3 beta 真机验收仍待完成，因此标记为预发布版。
 
           - 源码提交：https://github.com/$GH_REPO/commit/$SOURCE_SHA
-          - 构建与测试：https://github.com/$GH_REPO/actions/runs/$SOURCE_RUN
+          - 构建记录：https://github.com/$GH_REPO/actions/runs/$SOURCE_RUN
           - 安装与快捷指令配置：https://github.com/$GH_REPO/blob/$SOURCE_SHA/docs/ios-shortcut-billing.md
           - 需求验收对照：https://github.com/$GH_REPO/blob/$SOURCE_SHA/docs/ios-shortcut-acceptance.md
           EOF
           if ! gh release view "$TAG" --repo "$GH_REPO" > /dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GH_REPO" --target "$SOURCE_SHA" --title "BeeCount iOS 快捷记账 3.9.0 · Build $SOURCE_NUMBER" --notes-file release-notes.md --prerelease --draft --latest=false
+            gh release create "$TAG" --repo "$GH_REPO" --target "$GITHUB_SHA" --title "BeeCount iOS 快捷记账 3.9.0 · Build $SOURCE_NUMBER" --notes-file release-notes.md --prerelease --draft --latest=false
           fi
           gh release upload "$TAG" package/BeeCount-shortcut-unsigned.ipa package/SHA256SUMS.txt --repo "$GH_REPO" --clobber
           gh release edit "$TAG" --repo "$GH_REPO" --draft=false
