@@ -186,7 +186,10 @@ enum ConfirmedBilling {
         return object
     }
     static func call(_ payload: [String: Any]) async throws -> [String: Any] {
-        let object = try decode(await AppIntentsBridge.request(payload))
+        // Recognition includes network upload and model inference. The short
+        // persistence timeout must not cut it off while the AI client is waiting.
+        let timeout: TimeInterval = payload["operation"] as? String == "recognize" ? 300 : 20
+        let object = try decode(await AppIntentsBridge.request(payload, timeout: timeout))
         if object["status"] as? String == "error" {
             throw ShortcutBillingError(message: (object["message"] as? String ?? "操作失败") + " [" + (object["code"] as? String ?? "UNKNOWN") + "]")
         }
@@ -867,13 +870,24 @@ struct RecognizeConfirmBillingIntent: AppIntent {
     static var openAppWhenRun = false
     @Parameter(title: "图片") var image: IntentFile
     @Parameter(title: "使用本地 OCR 后文字 AI（留空跟随 App）") var useOCR: Bool?
+    @Parameter(title: "标签（留空跟随 App）") var tags: [BillingTag]?
+    @Parameter(title: "清空标签", default: false) var clearTags: Bool
+    @Parameter(title: "不计预算（留空跟随 App）") var excluded: Bool?
     @Parameter(title: "默认配置 JSON") var configuration: String?
     @Parameter(title: "菜单") var choice: String?
     static var parameterSummary: some ParameterSummary {
-        Summary("识别\(\.$image)并确认记账") { \.$useOCR }
+        Summary("识别\(\.$image)并确认记账") { \.$useOCR; \.$tags; \.$clearTags; \.$excluded }
+    }
+    @MainActor func recognitionConfiguration() throws -> [String: Any] {
+        var config = try configuration.map(ConfirmedBilling.decode) ?? [:]
+        if clearTags { config["tagIds"] = [Int]() }
+        else if let tags { config["tagIds"] = Array(Set(tags.map { $0.id })).sorted() }
+        if let excluded { config["excludeFromBudget"] = excluded }
+        return config
     }
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
-        let config = try configuration.map(ConfirmedBilling.decode) ?? [:]
+        let config = try recognitionConfiguration()
+        let effectiveConfiguration = try ConfirmedBilling.encode(config)
         let options = try await ConfirmedBilling.call(config.merging(["operation": "options"]) { _, new in new })
         let defaults = options["defaults"] as? [String: Any] ?? [:]
         let ocr = useOCR ?? ((config["mode"] as? String ?? defaults["mode"] as? String ?? "image") == "text")
@@ -881,10 +895,11 @@ struct RecognizeConfirmBillingIntent: AppIntent {
         let privacy = ocr ? "在本机取字，仅将文字发送给 App 配置的文字 AI 服务。" : "图片将发送给 App 配置的视觉 AI 服务。"
         if try await $choice.requestDisambiguation(among: ["继续识别", "取消"], dialog: IntentDialog(stringLiteral: privacy)) == "取消" { throw ShortcutBillingError(message: "已取消，未入账") }
         var draft: [String: Any]
-        do { draft = try await ConfirmedBilling.recognizeImage(image, ocr: ocr, configuration: configuration) }
+        do { draft = try await ConfirmedBilling.recognizeImage(image, ocr: ocr, configuration: effectiveConfiguration) }
         catch {
-            if try await $choice.requestDisambiguation(among: ["人工填写", "取消"], dialog: "识别未完成，未入账。可人工填写；不会自动上传原图。") == "取消" { throw error }
-            let defaults = try configuration.map(ConfirmedBilling.decode) ?? [:]
+            let detail = (error as? ShortcutBillingError)?.message ?? "请检查图片格式和 AI 配置"
+            if try await $choice.requestDisambiguation(among: ["人工填写", "取消"], dialog: IntentDialog(stringLiteral: "识别未完成，未入账。" + detail + "。不会自动上传原图。")) == "取消" { throw error }
+            let defaults = config
             let options = try await ConfirmedBilling.call(defaults.merging(["operation": "options"]) { _, new in new })
             let appDefaults = options["defaults"] as? [String: Any] ?? [:]
             let manual = appDefaults.merging(defaults) { _, explicit in explicit }

@@ -166,6 +166,14 @@ class ShortcutService {
                   logTag: 'ShortcutAI')
               : await AIProviderFactory.chat(prompt,
                   temperature: 0.1, logTag: 'ShortcutAI'));
+    } on AIException catch (error) {
+      final message = switch (error.code) {
+        AIExceptionCode.unauthorized => 'AI 密钥验证失败，请检查所选服务商的密钥',
+        AIExceptionCode.rateLimited => 'AI 服务限流，请稍后重试',
+        AIExceptionCode.invalidResponse => 'AI 返回内容无效，请检查所选模型是否支持图片或文字识别',
+        _ => 'AI 不可用，请在 App 的 AI 服务配置中测试对应图片/文字模型及连接',
+      };
+      throw ShortcutFailure('AI_UNAVAILABLE', message);
     } catch (_) {
       throw const ShortcutFailure(
           'AI_UNAVAILABLE', 'AI 不可用，请检查对应图片/文字模型配置；也可人工填写');

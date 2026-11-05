@@ -815,11 +815,11 @@ class AIProviderFactory {
     try {
       // 创建一个最小的测试图片
       final testImageBytes = _createTestImage();
-      final tempDir = Directory.systemTemp;
-      final testImage = File('${tempDir.path}/bee_test_image.jpg');
-      await testImage.writeAsBytes(testImageBytes);
+      final tempDir = await Directory.systemTemp.createTemp('bee-vision-test-');
+      final testImage = File('${tempDir.path}/image.jpg');
 
       try {
+        await testImage.writeAsBytes(testImageBytes);
         String response;
         if (config.isBuiltIn) {
           response = await _visionZhipu(config, testImage, '描述这张图片');
@@ -835,9 +835,7 @@ class AIProviderFactory {
         }
       } finally {
         // 清理测试图片
-        if (await testImage.exists()) {
-          await testImage.delete();
-        }
+        await tempDir.delete(recursive: true);
       }
     } on AIException catch (e) {
       logger.warning(tag, '视觉能力验证失败: ${e.message}');
@@ -1131,6 +1129,9 @@ class AIProviderFactory {
     String prompt,
   ) async {
     final dio = _getDio(config);
+    // Image uploads and inference can take longer than a text capability probe.
+    dio.options.sendTimeout = const Duration(seconds: 60);
+    dio.options.receiveTimeout = const Duration(seconds: 120);
 
     final imageBytes = await image.readAsBytes();
     final base64Image = base64Encode(imageBytes);
@@ -1138,30 +1139,29 @@ class AIProviderFactory {
     logger.debug('AIFactory', '请求: ${config.baseUrl}/chat/completions');
 
     try {
-      final response = await dio.post(
-        '/chat/completions',
-        data: {
-          'model': config.visionModel,
-          'messages': [
-            {
-              'role': 'user',
-              'content': [
-                {'type': 'text', 'text': prompt},
-                {
-                  'type': 'image_url',
-                  'image_url': {
-                    'url': 'data:image/jpeg;base64,$base64Image',
-                  },
+      final response = await _postChatCompletions(dio, {
+        'model': config.visionModel,
+        'messages': [
+          {
+            'role': 'user',
+            'content': [
+              {'type': 'text', 'text': prompt},
+              {
+                'type': 'image_url',
+                'image_url': {
+                  'url': 'data:image/jpeg;base64,$base64Image',
                 },
-              ],
-            },
-          ],
-        },
-      );
+              },
+            ],
+          },
+        ],
+      });
 
       return _extractChatContent(response, capability: '视觉');
     } on DioException catch (e) {
-      throw AIException(_extractDioError(e));
+      throw AIException(_extractDioError(e),
+          code:
+              classifyProviderError(e.response?.statusCode, e.response?.data));
     }
   }
 

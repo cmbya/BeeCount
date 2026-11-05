@@ -28,7 +28,10 @@ class AppIntentsBridge: NSObject, FlutterPlugin {
         return await withCheckedContinuation { continuation in
             shortcutWaiters[callId] = { continuation.resume(returning: $0) }
             let timer = DispatchWorkItem {
-                let reply = "{\"status\":\"error\",\"code\":\"RESULT_UNKNOWN\",\"message\":\"请求超时；提交可能已完成，请查询原请求，勿重新记账\"}"
+                let recognizing = payload["operation"] as? String == "recognize"
+                let reply = recognizing
+                    ? "{\"status\":\"error\",\"code\":\"RECOGNITION_TIMEOUT\",\"message\":\"识别超时，未入账。请检查 AI 服务或改用人工填写\"}"
+                    : "{\"status\":\"error\",\"code\":\"RESULT_UNKNOWN\",\"message\":\"请求超时；提交可能已完成，请查询原请求，勿重新记账\"}"
                 finishShortcut(callId: callId, response: reply)
             }
             shortcutTimers[callId] = timer

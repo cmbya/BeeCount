@@ -4,6 +4,33 @@ import XCTest
 @testable import Runner
 
 class RunnerTests: XCTestCase {
+  @available(iOS 16.0, *)
+  @MainActor
+  func testRecognitionParametersOverrideConfigurationWithoutLosingDefaults() throws {
+    var intent = RecognizeConfirmBillingIntent()
+    intent.configuration = try ConfirmedBilling.encode(["tagIds": [3], "excludeFromBudget": true, "ledgerId": 1])
+    let inherited = try intent.recognitionConfiguration()
+    XCTAssertEqual(inherited["tagIds"] as? [Int], [3])
+    XCTAssertEqual(inherited["excludeFromBudget"] as? Bool, true)
+    intent.tags = [BillingTag(id: 4, name: "家庭"), BillingTag(id: 4, name: "家庭")]
+    intent.excluded = false
+    let overridden = try intent.recognitionConfiguration()
+    XCTAssertEqual(overridden["tagIds"] as? [Int], [4])
+    XCTAssertEqual(overridden["excludeFromBudget"] as? Bool, false)
+    XCTAssertEqual(overridden["ledgerId"] as? Int, 1)
+    intent.clearTags = true
+    XCTAssertEqual(try intent.recognitionConfiguration()["tagIds"] as? [Int], [])
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testRecognitionTimeoutNeverClaimsAnUnknownCommit() async throws {
+    let response = try await AppIntentsBridge.request(["operation": "recognize"], timeout: 0.01)
+    let object = try ConfirmedBilling.decode(response)
+    XCTAssertEqual(object["code"] as? String, "RECOGNITION_TIMEOUT")
+    XCTAssertTrue((object["message"] as? String ?? "").contains("未入账"))
+  }
+
   private func menuValue(_ action: String, _ values: [String]) -> String {
     values.first { $0 == action || $0.hasPrefix(action + "：") } ?? action
   }

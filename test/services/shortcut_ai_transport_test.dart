@@ -28,13 +28,14 @@ void main() {
           await Directory.systemTemp.createTemp('shortcut-transport-');
       final requests = <Map<String, dynamic>>[];
       var fail = false;
+      var failStatus = 500;
       server.listen((request) async {
         expect(request.uri.path, '/v1/chat/completions');
         requests.add(jsonDecode(await utf8.decoder.bind(request).join())
             as Map<String, dynamic>);
         request.response.headers.contentType = ContentType.json;
         if (fail) {
-          request.response.statusCode = 500;
+          request.response.statusCode = failStatus;
           request.response.write(jsonEncode({
             'error': {'message': 'private upstream bill text'}
           }));
@@ -75,6 +76,14 @@ void main() {
           }),
         });
         final ledger = await repo.createLedger(name: 'Test');
+        final family = await repo.createTag(name: '家庭');
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(
+            shortcutDefaultsKey,
+            jsonEncode({
+              'tagIds': [family],
+              'excludeFromBudget': true
+            }));
         final service = ShortcutService(container);
         final text = await service.handle({
           'operation': 'recognize',
@@ -92,9 +101,15 @@ void main() {
           'operation': 'recognize',
           'mode': 'image',
           'ledgerId': ledger,
-          'imagePath': image.path
+          'imagePath': image.path,
+          'tagIds': <int>[],
+          'excludeFromBudget': false
         });
         expect(vision['status'], 'draft');
+        final candidate = (vision['candidates'] as List).single;
+        expect(candidate['amountMinor'], 1230);
+        expect(candidate['tagIds'], isEmpty);
+        expect(candidate['excludeFromBudget'], false);
         expect(requests.last['model'], 'vision-test');
         final content = requests.last['messages'][0]['content'] as List;
         expect(content.last['type'], 'image_url');
@@ -108,6 +123,14 @@ void main() {
           'text': 'private OCR 12.30'
         });
         expect(failure['code'], 'AI_UNAVAILABLE');
+        failStatus = 401;
+        final unauthorized = await service.handle({
+          'operation': 'recognize',
+          'mode': 'image',
+          'ledgerId': ledger,
+          'imagePath': image.path
+        });
+        expect(unauthorized['message'], contains('密钥验证失败'));
         expect(
             logger.logs.any((l) =>
                 l.toFormattedString().contains('private upstream bill text')),
