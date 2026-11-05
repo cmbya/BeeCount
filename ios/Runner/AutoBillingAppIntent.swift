@@ -910,7 +910,12 @@ struct RecognizeConfirmBillingIntent: AppIntent {
         let edited = try await editor.runEditor()
         let result = try await ConfirmedBilling.commit(ConfirmedBilling.decode(edited))
         let object = try ConfirmedBilling.decode(result)
-        let message = "已入账 " + String(object["count"] as? Int ?? 0) + " 条，合计 " + ConfirmedBilling.money(object["totalAmountMinor"] as? Int ?? 0, digits: object["minorDigits"] as? Int ?? 2) + " " + (object["currency"] as? String ?? "CNY") + "。云端尚未确认，请查看 App 同步状态，无需重记。"
+        let count = object["count"] as? Int ?? 0
+        let totalAmountMinor = object["totalAmountMinor"] as? Int ?? 0
+        let minorDigits = object["minorDigits"] as? Int ?? 2
+        let total = ConfirmedBilling.money(totalAmountMinor, digits: minorDigits)
+        let currency = object["currency"] as? String ?? "CNY"
+        let message = "已入账 \(count) 条，合计 \(total) \(currency)。云端尚未确认，请查看 App 同步状态，无需重记。"
         return .result(value: result, dialog: IntentDialog(stringLiteral: message))
     }
 }
