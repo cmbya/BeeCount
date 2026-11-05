@@ -136,4 +136,41 @@ void main() {
     expect(time.isAfter(DateTime.now().toUtc()), false);
     expect(await db.select(db.transactions).get(), isEmpty);
   });
+  test('receipt local time survives missing timezone and wins over AI current time', () {
+    const offset = 8 * 3600;
+    final result = ShortcutService.recognizedTime('2026-11-06T01:43:14+08:00',
+      sourceText: '支付时间：2026年11月5日 12:32:45\n商品：生活缴费', offsetSeconds: offset);
+    expect(result, DateTime.utc(2026, 11, 5, 4, 32, 45));
+    expect(ShortcutService.recognizedTime('2026-11-05T12:32:45', offsetSeconds: offset), result);
+    expect(ShortcutService.recognizedTime('2026-02-30T12:32:45', offsetSeconds: offset), isNull);
+    expect(ShortcutService.recognizedTime('', offsetSeconds: offset), isNull);
+  });
+
+  test('generated note has stable structure and ignores page metadata', () {
+    const text = '当前状态：支付成功\n支付时间：2026年11月5日 12:32:45\n商品：生活缴费\n商户全称：广东电网有限责任公司\n交易单号：TEST-ORDER';
+    final first = ShortcutService.buildNote({'merchant': '电网', 'purpose': '缴费', 'note': '支付成功；交易单号：OTHER'}, sourceText: text);
+    final second = ShortcutService.buildNote({'merchant': '不同模型内容', 'note': '收单机构：中国光大银行；交易单号：OTHER'}, sourceText: text);
+    expect(first, '广东电网有限责任公司｜生活缴费');
+    expect(second, first);
+    expect(first, isNot(contains('TEST-ORDER')));
+    expect(ShortcutService.buildNote({'merchant': '商户', 'purpose': '消费', 'userNote': '家庭用电'}), '商户｜消费｜家庭用电');
+  });
+
+  test('unclassified drafts can commit without inventing a category', () async {
+    final account = await repo.createAccount(ledgerId: ledger, name: '测试账户');
+    final service = ShortcutService(container);
+    final result = await service.handle({'operation': 'commit', 'submission': {
+      'schemaVersion': 1, 'confirmed': true, 'currency': 'CNY',
+      'requestId': '238e3341-3e15-47d7-9fe1-e6fb68e41257',
+      'ledgerId': ledger, 'accountId': account, 'type': 'expense',
+      'occurredAt': '2026-11-05T04:32:45Z', 'originalAmountMinor': 12789,
+      'entries': [{'amountMinor': 12789, 'categoryId': null, 'note': '生活缴费',
+        'tagIds': <int>[], 'excludeFromBudget': false}]
+    }});
+    expect(result['status'], 'committed');
+    final row = (await db.select(db.transactions).get()).single;
+    expect(row.categoryId, isNull);
+    expect(row.amount, 127.89);
+  });
+
 }

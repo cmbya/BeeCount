@@ -74,7 +74,7 @@ class ShortcutStore {
             .toSet();
         final tagIds = (await repo.getAllTags()).map((t) => t.id).toSet();
         for (final entry in request.entries) {
-          if ((request.type != 'transfer' &&
+          if ((request.type != 'transfer' && entry.categoryId != null &&
                   !categoryIds.contains(entry.categoryId)) ||
               !tagIds.containsAll(entry.tagIds)) {
             throw const ShortcutFailure('INVALID_REFERENCE', '分类或标签已失效，请重新选择');

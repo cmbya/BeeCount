@@ -174,6 +174,22 @@ private struct ShortcutBillingError: LocalizedError {
 @available(iOS 16.0, *)
 @MainActor
 enum ConfirmedBilling {
+    static func requestText(_ parameter: IntentParameter<String>, prompt: String) async throws -> String {
+        do {
+            return try await parameter.requestValue(IntentDialog(stringLiteral: prompt))
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Do not silently swallow an unsupported system input request.
+            throw ShortcutBillingError(message: "系统输入未完成，已保留原字段，请返回账单重试。" + error.localizedDescription)
+        }
+    }
+    static func nextTag(_ current: [Int], tags: [[String: Any]]) -> [Int] {
+        let ids = tags.compactMap { $0["id"] as? Int }
+        guard !ids.isEmpty else { return [] }
+        guard current.count == 1, let index = ids.firstIndex(of: current[0]) else { return [ids[0]] }
+        return [ids[(index + 1) % ids.count]]
+    }
     static func updatedNote(_ old: String, action: String, value: String?) -> String {
         if action == "保存空备注" { return "" }
         guard action != "取消修改", let value else { return old }
@@ -208,6 +224,7 @@ enum ConfirmedBilling {
         let data = try imageData(image)
         var input = try configuration.map(decode) ?? [:]
         input["operation"] = "recognize"
+        input["timeZoneOffsetSeconds"] = TimeZone.current.secondsFromGMT()
         if ocr {
             let text = try await localText(data)
             input["mode"] = "text"
@@ -349,6 +366,7 @@ struct TextBillingDraftIntent: AppIntent {
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
         var input = try configuration.map(ConfirmedBilling.decode) ?? [:]
         input["operation"] = "recognize"; input["mode"] = "text"; input["text"] = text
+        input["timeZoneOffsetSeconds"] = TimeZone.current.secondsFromGMT()
         return .result(value: try ConfirmedBilling.encode(await ConfirmedBilling.call(input)))
     }
 }
@@ -384,8 +402,8 @@ struct EditBillingDraftIntent: AppIntent {
     static var description: LocalizedStringResource = "系统菜单编辑、逐笔拆分并最终确认。此动作本身不入账。"
     static var openAppWhenRun = false
     @Parameter(title: "草稿 JSON") var draft: String
-    @Parameter(title: "菜单选择") var choice: String?
-    @Parameter(title: "输入内容") var textValue: String?
+    @Parameter(title: "菜单选择", inputConnectionBehavior: .never) var choice: String?
+    @Parameter(title: "输入内容", default: "", inputConnectionBehavior: .never) var textValue: String
 
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> {
         .result(value: try await runEditor())
@@ -395,7 +413,8 @@ struct EditBillingDraftIntent: AppIntent {
         let editor = ConfirmedBillingEditor(draft: draft, choose: { values, prompt in
             try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
         }, input: { prompt in
-            try await $textValue.requestValue(IntentDialog(stringLiteral: prompt))
+            textValue = ""
+            return try await ConfirmedBilling.requestText($textValue, prompt: prompt)
         })
         return try await editor.runEditor()
     }
@@ -434,7 +453,7 @@ final class ConfirmedBillingEditor {
             let fields = ["完成此笔", "金额"] + (type == "transfer" ? [] : ["分类"]) + ["备注", "标签"] + (type == "expense" ? ["预算标记"] : []) + ["取消本次字段修改"]
             let selected = try await self.fields(fields, title: "编辑账单明细", values: [
                 "金额": ConfirmedBilling.money(entry["amountMinor"] as? Int ?? 0, digits: digits),
-                "分类": ConfirmedBilling.label(entry["categoryId"] as? Int, categories),
+                "分类": entry["categoryId"] == nil ? "未分类" : ConfirmedBilling.label(entry["categoryId"] as? Int, categories),
                 "备注": entry["note"] as? String ?? "",
                 "标签": (entry["tagIds"] as? [Int] ?? []).map { ConfirmedBilling.label($0, tags) }.joined(separator: "、"),
                 "预算标记": entry["excludeFromBudget"] as? Bool == true ? "不计入预算" : "计入预算"
@@ -445,34 +464,28 @@ final class ConfirmedBillingEditor {
                     _ = try await choose(["返回修改"], "此笔超过剩余金额 " + ConfirmedBilling.money(maximum, digits: digits) + "，请修改金额")
                     continue
                 }
-                guard (entry["amountMinor"] as? Int ?? 0) > 0, (type == "transfer" || categories.contains(where: { $0["id"] as? Int == entry["categoryId"] as? Int })) else { _ = try await choose(["返回修改"], "请输入正金额并选择有效分类"); continue }
+                guard (entry["amountMinor"] as? Int ?? 0) > 0, (type == "transfer" || entry["categoryId"] == nil || categories.contains(where: { $0["id"] as? Int == entry["categoryId"] as? Int })) else { _ = try await choose(["返回修改"], "请输入正金额；已选分类必须有效"); continue }
                 return entry
             case "金额":
-                let value = try await input("当前 " + ConfirmedBilling.money(entry["amountMinor"] as? Int ?? 0, digits: digits) + "；输入新金额")
+                let value: String
+                do { value = try await input("当前 " + ConfirmedBilling.money(entry["amountMinor"] as? Int ?? 0, digits: digits) + "；输入新金额") }
+                catch is CancellationError { continue }
+                catch { _ = try await choose(["返回账单"], error.localizedDescription); continue }
                 if let amount = try? ConfirmedBilling.minor(value, digits: digits) { entry["amountMinor"] = amount }
                 else { _ = try await choose(["返回修改"], "金额无效，请输入大于零且符合账本小数位数的金额") }
             case "分类": entry["categoryId"] = try await pick(categories, "选择分类")
             case "备注":
                 let old = entry["note"] as? String ?? ""
-                let action = (try? await choose(["编辑", "追加", "清空重填", "保存空备注", "取消修改"], "原备注：" + old)) ?? "取消修改"
+                let action = try await choose(["编辑", "追加", "清空重填", "保存空备注", "取消修改"], "原备注：" + old)
                 var value: String?
                 if action != "保存空备注" && action != "取消修改" {
-                    value = try? await input((action == "追加" ? "追加内容；原备注：" : "输入最终备注；原备注：") + old)
+                    do { value = try await input((action == "追加" ? "追加内容；原备注：" : "输入最终备注；原备注：") + old) }
+                    catch is CancellationError { value = nil }
+                    catch { _ = try await choose(["返回账单"], error.localizedDescription); value = nil }
                 }
                 entry["note"] = ConfirmedBilling.updatedNote(old, action: action, value: value)
-            case "标签":
-                var selectedTags = entry["tagIds"] as? [Int] ?? []
-                while true {
-                    let labels = tags.map { (selectedTags.contains($0["id"] as? Int ?? -1) ? "✓ " : "○ ") + ($0["name"] as? String ?? "") + " [" + String($0["id"] as? Int ?? -1) + "]" }
-                    let value = try await choose(["完成标签选择", "清空所有标签"] + labels, "可反复点选多个标签")
-                    if value == "完成标签选择" { break }
-                    if value == "清空所有标签" { selectedTags = []; continue }
-                    if let index = labels.firstIndex(of: value), let id = tags[index]["id"] as? Int {
-                        if selectedTags.contains(id) { selectedTags.removeAll { $0 == id } } else { selectedTags.append(id) }
-                    }
-                }
-                entry["tagIds"] = selectedTags.sorted()
-            case "预算标记": entry["excludeFromBudget"] = try await choose(["计入预算", "不计入预算"], "仅影响预算，仍正常计支出") == "不计入预算"
+            case "标签": entry["tagIds"] = ConfirmedBilling.nextTag(entry["tagIds"] as? [Int] ?? [], tags: tags)
+            case "预算标记": entry["excludeFromBudget"] = !(entry["excludeFromBudget"] as? Bool ?? false)
             default: return initial
             }
         }
@@ -509,9 +522,6 @@ final class ConfirmedBillingEditor {
             if action == "取消" { throw ShortcutBillingError(message: "已取消，未入账") }
             candidate = [:]
         }
-        if let warnings = candidate["warnings"] as? [String], !warnings.isEmpty {
-            if try await choose(["继续核对", "取消"], warnings.joined(separator: "\n")) == "取消" { throw ShortcutBillingError(message: "已取消，未入账") }
-        }
         var total = candidate["amountMinor"] as? Int ?? 0
         while total <= 0 {
             let value = try await input("输入本次金额（" + currency + "）")
@@ -527,7 +537,7 @@ final class ConfirmedBillingEditor {
         if type == "transfer" && !accounts.contains(where: { $0["id"] as? Int == toAccountId && toAccountId != accountId }) { toAccountId = try await pick(accounts.filter { $0["id"] as? Int != accountId }, "选择转入账户") }
         var time = candidate["occurredAt"] as? String ?? ISO8601DateFormatter().string(from: Date())
         var entries: [[String: Any]] = [["amountMinor": total, "note": candidate["note"] as? String ?? "",
-            "tagIds": candidate["tagIds"] as? [Int] ?? defaults["tagIds"] as? [Int] ?? [],
+            "tagIds": Array((candidate["tagIds"] as? [Int] ?? defaults["tagIds"] as? [Int] ?? []).prefix(1)),
             "excludeFromBudget": type == "expense" && (candidate["excludeFromBudget"] as? Bool ?? defaults["excludeFromBudget"] as? Bool ?? false)]]
         if let categoryId = candidate["categoryId"] as? Int { entries[0]["categoryId"] = categoryId }
         var didSplit = false
@@ -545,7 +555,7 @@ final class ConfirmedBillingEditor {
             let directFields = single ? ["金额"] + (type == "transfer" ? [] : ["分类"]) + ["账户", "时间", "备注", "标签"] + (type == "expense" ? ["不计预算"] : []) : ["编辑明细", "删除明细", "修改原付款金额", "记账账户", "日期时间"]
             let actions = directFields + (type == "transfer" ? ["转入账户"] : []) + (type == "expense" ? ["拆分或新增明细"] : []) + ["账本", "收支类型", "确认提交", "取消提交", "刷新有效选项"]
             let selected = try await fields(actions, title: single ? "确认" + typeName(type) + "信息" : summary, values: [
-                "金额": ConfirmedBilling.money(total, digits: digits), "分类": ConfirmedBilling.label(entry["categoryId"] as? Int, categories),
+                "金额": ConfirmedBilling.money(total, digits: digits), "分类": entry["categoryId"] == nil ? "未分类" : ConfirmedBilling.label(entry["categoryId"] as? Int, categories),
                 "账户": ConfirmedBilling.label(accountId, accounts), "转入账户": ConfirmedBilling.label(toAccountId, accounts),
                 "时间": ConfirmedBilling.displayTime(time), "备注": entry["note"] as? String ?? "", "标签": tagNames.isEmpty ? "无" : tagNames,
                 "不计预算": entry["excludeFromBudget"] as? Bool == true ? "不计入预算" : "计入预算",
@@ -556,23 +566,16 @@ final class ConfirmedBillingEditor {
             case "分类": entries[0]["categoryId"] = try await pick(categories, "选择分类")
             case "备注":
                 let old = entries[0]["note"] as? String ?? ""
-                let operation = (try? await choose(["编辑", "追加", "清空重填", "保存空备注", "取消修改"], "原备注：" + old)) ?? "取消修改"
+                let operation = try await choose(["编辑", "追加", "清空重填", "保存空备注", "取消修改"], "原备注：" + old)
                 var value: String?
-                if operation != "保存空备注" && operation != "取消修改" { value = try? await input("输入备注；原备注：" + old) }
-                entries[0]["note"] = ConfirmedBilling.updatedNote(old, action: operation, value: value)
-            case "标签":
-                var ids = entries[0]["tagIds"] as? [Int] ?? []
-                while true {
-                    let labels = tags.map { (ids.contains($0["id"] as? Int ?? -1) ? "✓ " : "○ ") + ($0["name"] as? String ?? "") + " [" + String($0["id"] as? Int ?? -1) + "]" }
-                    let value = try await choose(["完成标签选择", "清空所有标签"] + labels, "选择标签")
-                    if value == "完成标签选择" { break }
-                    if value == "清空所有标签" { ids = []; continue }
-                    if let index = labels.firstIndex(of: value), let id = tags[index]["id"] as? Int {
-                        if ids.contains(id) { ids.removeAll { $0 == id } } else { ids.append(id) }
-                    }
+                if operation != "保存空备注" && operation != "取消修改" {
+                    do { value = try await input("输入备注；原备注：" + old) }
+                    catch is CancellationError { value = nil }
+                    catch { _ = try await choose(["返回账单"], error.localizedDescription); value = nil }
                 }
-                entries[0]["tagIds"] = ids.sorted()
-            case "不计预算": entries[0]["excludeFromBudget"] = try await choose(["计入预算", "不计入预算"], "是否计入预算") == "不计入预算"
+                entries[0]["note"] = ConfirmedBilling.updatedNote(old, action: operation, value: value)
+            case "标签": entries[0]["tagIds"] = ConfirmedBilling.nextTag(entries[0]["tagIds"] as? [Int] ?? [], tags: tags)
+            case "不计预算": entries[0]["excludeFromBudget"] = !(entries[0]["excludeFromBudget"] as? Bool ?? false)
             case "取消整次记账": throw ShortcutBillingError(message: "已取消，未入账")
             case "记账账户":
                 accountId = try await pick(accounts, type == "income" ? "选择收款账户" : "选择付款或转出账户")
@@ -629,7 +632,14 @@ final class ConfirmedBillingEditor {
                 if ISO8601DateFormatter().date(from: value) != nil || formatter.date(from: value) != nil { time = value }
                 else { _ = try await choose(["返回修改"], "日期时间格式无效，请输入带时区的完整日期时间") }
             case "修改原付款金额":
-                if let amount = try? ConfirmedBilling.minor(await input("输入原付款总额"), digits: digits) { total = amount; if !didSplit && entries.count == 1 { entries[0]["amountMinor"] = amount } }
+                let value: String
+                do { value = try await input("输入原付款总额") }
+                catch is CancellationError { continue }
+                catch { _ = try await choose(["返回账单"], error.localizedDescription); continue }
+                if let amount = try? ConfirmedBilling.minor(value, digits: digits) {
+                    total = amount
+                    if !didSplit && entries.count == 1 { entries[0]["amountMinor"] = amount }
+                } else { _ = try await choose(["返回修改"], "请输入有效正金额") }
             case "拆分或新增明细":
                 if !didSplit {
                     if try await choose(["开始拆分", "返回"], "原整笔草稿将替换为逐笔明细，暂不入账") == "返回" { continue }
@@ -638,9 +648,9 @@ final class ConfirmedBillingEditor {
                 guard entries.count < 100 else { continue }
                 let remaining = total - entries.reduce(0) { $0 + ($1["amountMinor"] as? Int ?? 0) }
                 guard remaining > 0 else { continue }
-                var entry: [String: Any] = ["amountMinor": remaining, "note": candidate["note"] as? String ?? "", "tagIds": candidate["tagIds"] as? [Int] ?? defaults["tagIds"] as? [Int] ?? [], "excludeFromBudget": candidate["excludeFromBudget"] as? Bool ?? defaults["excludeFromBudget"] as? Bool ?? false]
+                var entry: [String: Any] = ["amountMinor": remaining, "note": candidate["note"] as? String ?? "", "tagIds": Array((candidate["tagIds"] as? [Int] ?? defaults["tagIds"] as? [Int] ?? []).prefix(1)), "excludeFromBudget": candidate["excludeFromBudget"] as? Bool ?? defaults["excludeFromBudget"] as? Bool ?? false]
                 entry = try await edit(entry, categories: categories, tags: tags, digits: digits, type: type, maximum: remaining)
-                if (entry["amountMinor"] as? Int ?? 0) <= remaining && entry["categoryId"] is Int { entries.append(entry) }
+                if (entry["amountMinor"] as? Int ?? 0) <= remaining { entries.append(entry) }
             case "编辑明细", "删除明细":
                 guard !entries.isEmpty else { continue }
                 let labels = entries.enumerated().map { "第 " + String($0.offset + 1) + " 笔 " + ConfirmedBilling.money($0.element["amountMinor"] as? Int ?? 0, digits: digits) }
@@ -650,8 +660,8 @@ final class ConfirmedBillingEditor {
                 else { entries[index] = try await edit(entries[index], categories: categories, tags: tags, digits: digits, type: type) }
             case "确认提交":
                 guard !entries.isEmpty, used == total, entries.allSatisfy({ entry in
-                    (entry["amountMinor"] as? Int ?? 0) > 0 && (type == "transfer" || categories.contains { $0["id"] as? Int == entry["categoryId"] as? Int })
-                }) else { _ = try await choose(["返回修改"], "金额尚未分配完、超额或分类未选择，不能提交"); continue }
+                    (entry["amountMinor"] as? Int ?? 0) > 0 && (type == "transfer" || entry["categoryId"] == nil || categories.contains { $0["id"] as? Int == entry["categoryId"] as? Int })
+                }) else { _ = try await choose(["返回修改"], "金额尚未分配完、超额或已选分类失效，不能提交"); continue }
                 if type == "transfer" && (toAccountId == nil || toAccountId == accountId) {
                     toAccountId = try await pick(accounts.filter { $0["id"] as? Int != accountId }, "选择不同的转入账户"); continue
                 }
@@ -824,8 +834,8 @@ struct CustomExpenseBillingIntent: AppIntent {
     @Parameter(title: "账户") var account: BillingAccount?
     @Parameter(title: "标签") var tags: [BillingTag]?
     @Parameter(title: "不计预算", default: false) var excluded: Bool
-    @Parameter(title: "菜单") var choice: String?
-    @Parameter(title: "输入") var textValue: String?
+    @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
+    @Parameter(title: "输入", default: "", inputConnectionBehavior: .never) var textValue: String
     static var parameterSummary: some ParameterSummary {
         Summary("自定义支出账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$account; \.$tags; \.$excluded }
     }
@@ -833,7 +843,8 @@ struct CustomExpenseBillingIntent: AppIntent {
         let draft = try await CustomBilling.draft(type: "expense", ledger: ledger, category: category, amount: amount, date: date, note: note, account: account, destination: nil, tags: tags, excluded: excluded)
         let editor = ConfirmedBillingEditor(draft: draft, choose: { values, prompt in
             try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
-        }, input: { prompt in try await $textValue.requestValue(IntentDialog(stringLiteral: prompt)) })
+        }, input: { prompt in textValue = ""
+            return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
         let submission = try await editor.runEditor()
         let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission))
         return .result(value: saved, dialog: try CustomBilling.result(saved))
@@ -855,8 +866,8 @@ struct CustomIncomeBillingIntent: AppIntent {
     @Parameter(title: "备注") var note: String?
     @Parameter(title: "账户") var account: BillingAccount?
     @Parameter(title: "标签") var tags: [BillingTag]?
-    @Parameter(title: "菜单") var choice: String?
-    @Parameter(title: "输入") var textValue: String?
+    @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
+    @Parameter(title: "输入", default: "", inputConnectionBehavior: .never) var textValue: String
     static var parameterSummary: some ParameterSummary {
         Summary("自定义收入账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$account; \.$tags }
     }
@@ -864,7 +875,8 @@ struct CustomIncomeBillingIntent: AppIntent {
         let draft = try await CustomBilling.draft(type: "income", ledger: ledger, category: category, amount: amount, date: date, note: note, account: account, destination: nil, tags: tags, excluded: false)
         let editor = ConfirmedBillingEditor(draft: draft, choose: { values, prompt in
             try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
-        }, input: { prompt in try await $textValue.requestValue(IntentDialog(stringLiteral: prompt)) })
+        }, input: { prompt in textValue = ""
+            return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
         let submission = try await editor.runEditor()
         let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission))
         return .result(value: saved, dialog: try CustomBilling.result(saved))
@@ -886,8 +898,8 @@ struct CustomTransferBillingIntent: AppIntent {
     @Parameter(title: "转出账户") var account: BillingAccount?
     @Parameter(title: "转入账户") var destination: BillingAccount?
     @Parameter(title: "标签") var tags: [BillingTag]?
-    @Parameter(title: "菜单") var choice: String?
-    @Parameter(title: "输入") var textValue: String?
+    @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
+    @Parameter(title: "输入", default: "", inputConnectionBehavior: .never) var textValue: String
     static var parameterSummary: some ParameterSummary {
         Summary("自定义转账账单") { \.$ledger; \.$amount; \.$date; \.$note; \.$account; \.$destination; \.$tags }
     }
@@ -895,7 +907,8 @@ struct CustomTransferBillingIntent: AppIntent {
         let draft = try await CustomBilling.draft(type: "transfer", ledger: ledger, category: nil, amount: amount, date: date, note: note, account: account, destination: destination, tags: tags, excluded: false)
         let editor = ConfirmedBillingEditor(draft: draft, choose: { values, prompt in
             try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
-        }, input: { prompt in try await $textValue.requestValue(IntentDialog(stringLiteral: prompt)) })
+        }, input: { prompt in textValue = ""
+            return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
         let submission = try await editor.runEditor()
         let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission))
         return .result(value: saved, dialog: try CustomBilling.result(saved))
@@ -915,7 +928,7 @@ struct RecognizeConfirmBillingIntent: AppIntent {
     @Parameter(title: "清空标签", default: false) var clearTags: Bool
     @Parameter(title: "不计预算（留空跟随 App）") var excluded: Bool?
     @Parameter(title: "默认配置 JSON") var configuration: String?
-    @Parameter(title: "菜单") var choice: String?
+    @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
     static var parameterSummary: some ParameterSummary {
         Summary("识别\(\.$image)并确认记账") { \.$useOCR; \.$tags; \.$clearTags; \.$excluded }
     }
@@ -932,9 +945,6 @@ struct RecognizeConfirmBillingIntent: AppIntent {
         let options = try await ConfirmedBilling.call(config.merging(["operation": "options"]) { _, new in new })
         let defaults = options["defaults"] as? [String: Any] ?? [:]
         let ocr = useOCR ?? ((config["mode"] as? String ?? defaults["mode"] as? String ?? "image") == "text")
-        // Consent before sending bill data. No automatic image fallback.
-        let privacy = ocr ? "在本机取字，仅将文字发送给 App 配置的文字 AI 服务。" : "图片将发送给 App 配置的视觉 AI 服务。"
-        if try await $choice.requestDisambiguation(among: ["继续识别", "取消"], dialog: IntentDialog(stringLiteral: privacy)) == "取消" { throw ShortcutBillingError(message: "已取消，未入账") }
         var draft: [String: Any]
         do { draft = try await ConfirmedBilling.recognizeImage(image, ocr: ocr, configuration: effectiveConfiguration) }
         catch {
@@ -987,12 +997,6 @@ enum RecognitionBillingFlow {
         let options = try await ConfirmedBilling.call(configuration.merging(["operation": "options"]) { _, value in value })
         var config = configuration
         config["ledgerId"] = options["ledgerId"]
-        let privacy = image != nil
-            ? "图片将发送给 App 配置的视觉 AI；本地取字仅补充分类规则。"
-            : "仅将传入文字发送给 App 配置的文字 AI，不发送原图。"
-        if try await choose(["继续识别", "取消"], privacy) == "取消" {
-            throw ShortcutBillingError(message: "已取消，未入账")
-        }
         var draft: [String: Any]
         do {
             if let image {
@@ -1001,6 +1005,7 @@ enum RecognitionBillingFlow {
                 var payload = config
                 payload["operation"] = "recognize"
                 payload["mode"] = "text"
+                payload["timeZoneOffsetSeconds"] = TimeZone.current.secondsFromGMT()
                 payload["text"] = text ?? ""
                 draft = try await ConfirmedBilling.call(payload)
             }
@@ -1032,8 +1037,8 @@ struct ImageConfirmBillingIntent: AppIntent {
     @Parameter(title: "标签（留空跟随 App）") var tags: [BillingTag]?
     @Parameter(title: "清空标签", default: false) var clearTags: Bool
     @Parameter(title: "不计预算（仅支出，留空跟随 App）") var excluded: Bool?
-    @Parameter(title: "菜单") var choice: String?
-    @Parameter(title: "输入") var textValue: String?
+    @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
+    @Parameter(title: "输入", default: "", inputConnectionBehavior: .never) var textValue: String
     static var parameterSummary: some ParameterSummary {
         Summary("识别\(\.$image)并确认记账") { \.$ledger; \.$tags; \.$clearTags; \.$excluded }
     }
@@ -1041,7 +1046,8 @@ struct ImageConfirmBillingIntent: AppIntent {
         let config = RecognitionBillingFlow.configuration(ledger: ledger, tags: tags, clearTags: clearTags, excluded: excluded)
         let saved = try await RecognitionBillingFlow.run(image: image, configuration: config, choose: { values, prompt in
             try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
-        }, input: { prompt in try await $textValue.requestValue(IntentDialog(stringLiteral: prompt)) })
+        }, input: { prompt in textValue = ""
+            return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
         return .result(value: saved, dialog: try CustomBilling.result(saved))
     }
 }
@@ -1056,8 +1062,8 @@ struct TextConfirmBillingIntent: AppIntent {
     @Parameter(title: "标签（留空跟随 App）") var tags: [BillingTag]?
     @Parameter(title: "清空标签", default: false) var clearTags: Bool
     @Parameter(title: "不计预算（仅支出，留空跟随 App）") var excluded: Bool?
-    @Parameter(title: "菜单") var choice: String?
-    @Parameter(title: "输入") var textValue: String?
+    @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
+    @Parameter(title: "输入", default: "", inputConnectionBehavior: .never) var textValue: String
     static var parameterSummary: some ParameterSummary {
         Summary("识别\(\.$text)并确认记账") { \.$ledger; \.$tags; \.$clearTags; \.$excluded }
     }
@@ -1065,7 +1071,8 @@ struct TextConfirmBillingIntent: AppIntent {
         let config = RecognitionBillingFlow.configuration(ledger: ledger, tags: tags, clearTags: clearTags, excluded: excluded)
         let saved = try await RecognitionBillingFlow.run(text: text, configuration: config, choose: { values, prompt in
             try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
-        }, input: { prompt in try await $textValue.requestValue(IntentDialog(stringLiteral: prompt)) })
+        }, input: { prompt in textValue = ""
+            return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
         return .result(value: saved, dialog: try CustomBilling.result(saved))
     }
 }

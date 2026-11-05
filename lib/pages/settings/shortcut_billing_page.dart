@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../../data/db.dart';
+import '../tag/tag_manage_page.dart';
 import '../../data/repositories/local/local_repository.dart';
 import '../../providers.dart';
 import '../../services/automation/shortcut_service.dart';
@@ -246,9 +247,19 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                     style:
                         TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                 const Text(
-                    '支出可拆分后一次提交，取消不入账。支持个人账本与同币种账户，金额精度跟随账本。原截图自动记账入口保持原行为。'),
+                    '支出可拆分后一次提交，取消不入账。标签点击即按顺序切换一个；预算点击即反转。图片／文字会发送至所配置的 AI 服务，识别前不重复弹说明。'),
                 const SizedBox(height: 16),
+                ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.label_outline),
+                    title: const Text('管理标签（新增／删除）'),
+                    subtitle: const Text('来源标签也可删除；仅移除标签及关联，不删除账目。'),
+                    onTap: () async {
+                      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TagManagePage()));
+                      if (mounted) refresh();
+                    }),
                 const ListTile(
+
                     contentPadding: EdgeInsets.zero,
                     title: Text('账本：使用 App 当前账本'),
                     subtitle: Text('可在图片记账或文字记账动作中预设账本覆盖。账户按内容识别，无法唯一匹配时弹出选择，不使用旧默认账户。')),
@@ -272,7 +283,7 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                       defaults['excludeFromBudget'] = v;
                       saveDefaults();
                     }),
-                const Text('默认标签（可多选）'),
+                const Text('默认标签（确认菜单点击轮换单个标签）'),
                 Wrap(
                     spacing: 8,
                     children: tags
@@ -284,19 +295,16 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                               final values = (defaults['tagIds'] as List? ?? [])
                                   .cast<int>()
                                   .toSet();
-                              if (selected) {
-                                values.add(t.id);
-                              } else {
-                                values.remove(t.id);
-                              }
-                              defaults['tagIds'] = values.toList()..sort();
+                              values.clear();
+                              if (selected) values.add(t.id);
+                              defaults['tagIds'] = values.toList();
                               saveDefaults();
                             }))
                         .toList()),
                 const Divider(height: 32),
                 ListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('个人分类规则'),
+                    title: const Text('个人分类规则（点击右侧＋新增）'),
                     subtitle: const Text(
                         '优先级越大越优先，同级按稳定 ID 排序；个人规则优先于内置规则和 AI。仅保存在本机。'),
                     trailing: IconButton(

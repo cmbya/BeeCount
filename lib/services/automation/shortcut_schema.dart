@@ -92,7 +92,8 @@ class ShortcutEntry {
     return ShortcutEntry(
         amountMinor: shortcutInt(json['amountMinor'], '金额'),
         categoryId:
-            type == 'transfer' ? null : shortcutInt(json['categoryId'], '分类'),
+            type == 'transfer' || json['categoryId'] == null
+                ? null : shortcutInt(json['categoryId'], '分类'),
         note: json['note'] as String,
         tagIds: tags.cast<int>().toSet().toList()..sort(),
         excludeFromBudget: json['excludeFromBudget'] as bool);

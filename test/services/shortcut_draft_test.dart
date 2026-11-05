@@ -77,6 +77,7 @@ void main() {
           'merchant': '瑞幸',
           'category': 'AI分类',
           'note': '咖啡原文',
+          'userNote': '咖啡原文',
           'time': '2026-11-05T18:30:00+08:00',
           'currency': 'CNY'
         }
@@ -96,7 +97,7 @@ void main() {
     expect(candidate['amountMinor'], 1230);
     expect(candidate['tagIds'], isEmpty);
     expect(candidate['excludeFromBudget'], true);
-    expect(candidate['note'], '咖啡原文');
+    expect(candidate['note'], '瑞幸｜咖啡原文');
     expect(called, 1);
     expect(await db.select(db.transactions).get(), isEmpty);
     final empty = await service.handle({

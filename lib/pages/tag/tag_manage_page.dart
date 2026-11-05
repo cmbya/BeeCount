@@ -611,13 +611,11 @@ class _TagCard extends StatelessWidget {
                           ),
                         ),
                         // 删除按钮
-                        GestureDetector(
-                          onTap: onDelete,
-                          child: Icon(
-                            Icons.delete_outline,
-                            size: 18,
-                            color: BeeTokens.iconTertiary(context),
-                          ),
+                        IconButton(
+                          tooltip: '删除标签（不删除账目）',
+                          onPressed: onDelete,
+                          icon: Icon(Icons.delete_outline,
+                              size: 22, color: BeeTokens.iconTertiary(context)),
                         ),
                       ],
                     ),

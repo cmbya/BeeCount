@@ -55,7 +55,7 @@ class RunnerTests: XCTestCase {
   @available(iOS 16.0, *)
   @MainActor
   func testConfirmationMenuShowsEditableValuesAndSavesFinalValues() async throws {
-    var choices = ["金额", "分类", "1. 餐饮", "账户", "2. 银行卡", "时间", "备注", "追加", "标签", "清空所有标签", "○ 家庭 [4]", "完成标签选择", "不计预算", "不计入预算", "确认提交"]
+    var choices = ["金额", "分类", "1. 餐饮", "账户", "2. 银行卡", "时间", "备注", "追加", "标签", "不计预算", "确认提交"]
     var inputs = ["127.89", "2026-11-05T12:32:00+08:00", "生活缴费"]
     var sawValues = false
     let editor = ConfirmedBillingEditor(draft: try editorDraft(), choose: { values, prompt in
@@ -125,7 +125,7 @@ class RunnerTests: XCTestCase {
     var choices = ["收支类型", "收入", "分类", "1. 工资", "确认提交"]
     var incomeFields = false
     let editor = ConfirmedBillingEditor(draft: try editorDraft(), choose: { values, _ in
-      if values.contains("确认提交") && values.contains(where: { $0 == "分类：待选择" }) { incomeFields = true; XCTAssertFalse(values.contains { $0.hasPrefix("不计预算") }) }
+      if values.contains("确认提交") && values.contains(where: { $0 == "分类：未分类" }) { incomeFields = true; XCTAssertFalse(values.contains { $0.hasPrefix("不计预算") }) }
       let selected = self.menuValue(choices.removeFirst(), values); XCTAssertTrue(values.contains(selected), selected); return selected
     }, input: { _ in "" }, call: { request in
       request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions(request["type"] as? String ?? "expense")
@@ -141,7 +141,7 @@ class RunnerTests: XCTestCase {
   @MainActor
   func testEditorSplitsAndSummarizesWithoutSaving() async throws {
     var choices = ["拆分或新增明细", "开始拆分", "金额", "分类", "1. 餐饮", "完成此笔",
-      "拆分或新增明细", "金额", "分类", "1. 餐饮", "预算标记", "不计入预算", "完成此笔",
+      "拆分或新增明细", "金额", "分类", "1. 餐饮", "预算标记", "完成此笔",
       "拆分或新增明细", "分类", "1. 餐饮", "完成此笔", "确认提交"]
     var inputs = ["80", "150"]
     var prompts: [String] = []
@@ -309,6 +309,81 @@ class RunnerTests: XCTestCase {
     let result = try ConfirmedBilling.decode(await editor.runEditor())
     XCTAssertTrue(asked)
     XCTAssertEqual(result["accountId"] as? Int, 2)
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testTagCyclesOneAtATimeWithoutSubmenu() {
+    let tags: [[String: Any]] = [["id": 3], ["id": 4], ["id": 5]]
+    XCTAssertEqual(ConfirmedBilling.nextTag([3], tags: tags), [4])
+    XCTAssertEqual(ConfirmedBilling.nextTag([4], tags: tags), [5])
+    XCTAssertEqual(ConfirmedBilling.nextTag([5], tags: tags), [3])
+    XCTAssertEqual(ConfirmedBilling.nextTag([], tags: tags), [3])
+    XCTAssertEqual(ConfirmedBilling.nextTag([99], tags: tags), [3])
+    XCTAssertEqual(ConfirmedBilling.nextTag([3, 4], tags: tags), [3])
+    XCTAssertEqual(ConfirmedBilling.nextTag([3], tags: []), [])
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testWarningsDoNotInterruptAndBudgetTogglesDirectly() async throws {
+    var draft = try ConfirmedBilling.decode(editorDraft())
+    var candidates = try XCTUnwrap(draft["candidates"] as? [[String: Any]])
+    candidates[0]["warnings"] = ["账单未标明时区", "没有适用分类"]
+    draft["candidates"] = candidates
+    var choices = ["不计预算", "不计预算", "确认提交"]
+    var states: [String] = []
+    let editor = ConfirmedBillingEditor(draft: try ConfirmedBilling.encode(draft), choose: { values, prompt in
+      XCTAssertEqual(prompt, "确认支出信息")
+      states.append(values.first { $0.hasPrefix("不计预算：") } ?? "")
+      let selected = self.menuValue(choices.removeFirst(), values)
+      XCTAssertTrue(values.contains(selected))
+      return selected
+    }, input: { _ in XCTFail("Unexpected input"); return "" }, call: { request in
+      request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions()
+    })
+    let result = try ConfirmedBilling.decode(await editor.runEditor())
+    XCTAssertEqual(states, ["不计预算：计入预算", "不计预算：不计入预算", "不计预算：计入预算"])
+    XCTAssertEqual((result["entries"] as? [[String: Any]])?.first?["excludeFromBudget"] as? Bool, false)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testRepeatedAmountAndNoteRequestsReturnToSummary() async throws {
+    var choices = ["金额", "金额", "备注", "追加", "备注", "清空重填", "确认提交"]
+    var inputs = ["301", "302", "追加", "最终备注"]
+    let editor = ConfirmedBillingEditor(draft: try editorDraft(), choose: { values, _ in
+      let selected = self.menuValue(choices.removeFirst(), values)
+      XCTAssertTrue(values.contains(selected)); return selected
+    }, input: { _ in inputs.removeFirst() }, call: { request in
+      request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions()
+    })
+    let result = try ConfirmedBilling.decode(await editor.runEditor())
+    XCTAssertEqual(result["originalAmountMinor"] as? Int, 30200)
+    XCTAssertEqual((result["entries"] as? [[String: Any]])?.first?["note"] as? String, "最终备注")
+    XCTAssertTrue(inputs.isEmpty)
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testAmountInputErrorReturnsToDraftWithoutCommit() async throws {
+    var choices = ["金额", "返回账单", "确认提交"]
+    var validations = 0
+    let editor = ConfirmedBillingEditor(draft: try editorDraft(), choose: { values, _ in
+      let selected = self.menuValue(choices.removeFirst(), values)
+      XCTAssertTrue(values.contains(selected)); return selected
+    }, input: { _ in throw NSError(domain: "InputTest", code: 1) }, call: { request in
+      if request["operation"] as? String == "validate" { validations += 1; return ["status": "valid"] }
+      XCTAssertEqual(request["operation"] as? String, "options")
+      return self.editorOptions()
+    })
+    let result = try ConfirmedBilling.decode(await editor.runEditor())
+    XCTAssertEqual(result["originalAmountMinor"] as? Int, 30000)
+    XCTAssertEqual(validations, 1)
     XCTAssertTrue(choices.isEmpty)
   }
 
