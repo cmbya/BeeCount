@@ -3606,5 +3606,9 @@
   "transactionReceiptTags": "标签",
   "transactionReceiptFooter": "认真记录，好好生活",
   "transactionReceiptUnavailable": "无法生成小票，请检查这笔交易是否仍然存在。",
-  "transactionReceiptShareFailed": "分享失败，请重试。"
+  "transactionReceiptShareFailed": "分享失败，请重试。",
+  "transactionDetailTitle": "账单详情",
+  "transactionDetailCurrencyHint": "更改币种会清空已选账户，并重新折算账本金额；需要有效汇率。是否继续？",
+  "transactionDetailSaveFailed": "保存失败，请检查所选资料、编辑权限及有效汇率。",
+  "transactionDetailImages": "图片"
 }

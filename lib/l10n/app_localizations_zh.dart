@@ -6,6 +6,19 @@ import 'app_localizations.dart';
 
 /// The translations for Chinese (`zh`).
 class AppLocalizationsZh extends AppLocalizations {
+  @override
+  String get transactionDetailImages => "图片";
+
+  @override
+  String get transactionDetailTitle => "账单详情";
+
+  @override
+  String get transactionDetailCurrencyHint => "更改币种会清空已选账户，并重新折算账本金额；需要有效汇率。是否继续？";
+
+  @override
+  String get transactionDetailSaveFailed => "保存失败，请检查所选资料、编辑权限及有效汇率。";
+
+
   AppLocalizationsZh([String locale = 'zh']) : super(locale);
 
   @override
@@ -8677,6 +8690,19 @@ class AppLocalizationsZh extends AppLocalizations {
 
 /// The translations for Chinese, as used in Taiwan (`zh_TW`).
 class AppLocalizationsZhTw extends AppLocalizationsZh {
+  @override
+  String get transactionDetailImages => "圖片";
+
+  @override
+  String get transactionDetailTitle => "帳單詳情";
+
+  @override
+  String get transactionDetailCurrencyHint => "更改幣別會清空已選帳戶，並重新換算帳本金額；需要有效匯率。是否繼續？";
+
+  @override
+  String get transactionDetailSaveFailed => "儲存失敗，請檢查所選資料、編輯權限及有效匯率。";
+
+
   AppLocalizationsZhTw(): super('zh_TW');
 
   @override

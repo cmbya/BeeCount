@@ -6,6 +6,19 @@ import 'app_localizations.dart';
 
 /// The translations for Korean (`ko`).
 class AppLocalizationsKo extends AppLocalizations {
+  @override
+  String get transactionDetailImages => "이미지";
+
+  @override
+  String get transactionDetailTitle => "거래 상세";
+
+  @override
+  String get transactionDetailCurrencyHint => "통화를 변경하면 선택한 계좌가 해제되고 장부 금액이 다시 계산됩니다. 유효한 환율이 필요합니다. 계속할까요?";
+
+  @override
+  String get transactionDetailSaveFailed => "저장하지 못했습니다. 선택 항목, 권한 및 환율을 확인하세요.";
+
+
   AppLocalizationsKo([String locale = 'ko']) : super(locale);
 
   @override

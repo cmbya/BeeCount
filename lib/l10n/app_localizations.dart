@@ -16278,6 +16278,11 @@ abstract class AppLocalizations {
   ///
   /// In en, this message translates to:
   /// **'Generate receipt'**
+  String get transactionDetailImages;
+  String get transactionDetailTitle;
+  String get transactionDetailCurrencyHint;
+  String get transactionDetailSaveFailed;
+
   String get transactionReceiptAction;
 
   /// No description provided for @transactionReceiptTitle.

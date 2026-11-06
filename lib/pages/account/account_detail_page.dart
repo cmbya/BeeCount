@@ -1039,16 +1039,8 @@ class _AccountDetailPageState extends ConsumerState<AccountDetailPage> {
 
   Future<void> _editTransaction(
       BuildContext context, WidgetRef ref, db.Transaction tx) async {
-    final categoryAsync = tx.categoryId != null
-        ? await ref.read(categoriesProvider.future)
-        : null;
-    final category = categoryAsync?.cast<db.Category?>().firstWhere(
-          (c) => c?.id == tx.categoryId,
-          orElse: () => null,
-        );
-
+    await TransactionEditUtils.viewTransaction(context, tx.id);
     if (!context.mounted) return;
-    await TransactionEditUtils.editTransaction(context, ref, tx, category);
 
     // 刷新数据
     ref.invalidate(accountStatsProvider(widget.account.id));

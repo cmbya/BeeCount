@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/db.dart';
 import '../pages/transaction/transaction_editor_page.dart';
+import '../pages/transaction/transaction_detail_page.dart';
 import '../data/repositories/local/local_repository.dart';
 import '../providers/database_providers.dart';
 import '../l10n/app_localizations.dart';
@@ -9,6 +10,11 @@ import '../widgets/ui/toast.dart';
 import 'shared_ledger_picker_filter.dart' show syntheticIdForSyncId;
 
 class TransactionEditUtils {
+  static Future<void> viewTransaction(BuildContext context, int transactionId) async {
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => TransactionDetailPage(transactionId: transactionId)));
+  }
+
   static Future<void> copyTransaction(
     BuildContext context,
     WidgetRef ref,
@@ -33,11 +39,15 @@ class TransactionEditUtils {
   }) async {
     // 获取交易关联的标签ID(主表 + §7 override 表)
     final repo = ref.read(repositoryProvider);
-    final source =
-        asCopy ? await repo.getTransactionById(transaction.id) : transaction;
+    final source = await repo.getTransactionById(transaction.id);
     transaction = source ?? transaction;
     final ledger = await repo.getLedgerById(transaction.ledgerId);
     if (!context.mounted) return;
+    if (!asCopy && (source == null || ledger == null ||
+        (ledger.isShared && !const {'owner', 'editor'}.contains(ledger.myRole)))) {
+      showToast(context, AppLocalizations.of(context).transactionCopyUnavailable);
+      return;
+    }
     if (asCopy &&
         (source == null ||
             ledger == null ||
@@ -161,7 +171,12 @@ class TransactionEditUtils {
                   initialCurrencyCode: transaction.currencyCode,
                   initialNativeAmount: transaction.nativeAmount,
                 );
-          return editor;
+          // Historical rows may belong to a ledger other than the homepage.
+          // Scope existing pickers/currency providers without changing global selection.
+          if (asCopy) return editor;
+          return ProviderScope(overrides: [
+            currentLedgerIdProvider.overrideWith((ref) => transaction.ledgerId),
+          ], child: editor);
         },
       ),
     );

@@ -1114,13 +1114,7 @@ class _SearchPageState extends ConsumerState<SearchPage> {
                                 onTap: _isBatchMode
                                     ? null
                                     : () async {
-                                        await TransactionEditUtils
-                                            .editTransaction(
-                                          context,
-                                          ref,
-                                          item.t,
-                                          item.category,
-                                        );
+                                        await TransactionEditUtils.viewTransaction(context, item.t.id);
                                       },
                                 onCategoryTap: _isBatchMode ||
                                         isTransfer ||

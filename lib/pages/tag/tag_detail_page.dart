@@ -421,12 +421,7 @@ class _TagDetailPageState extends ConsumerState<TagDetailPage> {
                 isExpense: transaction.type == 'expense',
                 happenedAt: transaction.happenedAt,
                 onTap: () async {
-                  await TransactionEditUtils.editTransaction(
-                    context,
-                    ref,
-                    transaction,
-                    category,
-                  );
+                  await TransactionEditUtils.viewTransaction(context, transaction.id);
                 },
                 onDelete: () async {
                   await _deleteTransaction(transaction, l10n);

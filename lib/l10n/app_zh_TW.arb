@@ -3289,5 +3289,9 @@
   "syncHealthLedgerMissing": "本機找不到 ledger={id}",
   "logExportTitle": "=== BeeCount 日誌匯出 ===",
   "logExportTime": "匯出時間：{time}",
-  "logExportCount": "日誌數量：{count}"
+  "logExportCount": "日誌數量：{count}",
+  "transactionDetailTitle": "帳單詳情",
+  "transactionDetailCurrencyHint": "更改幣別會清空已選帳戶，並重新換算帳本金額；需要有效匯率。是否繼續？",
+  "transactionDetailSaveFailed": "儲存失敗，請檢查所選資料、編輯權限及有效匯率。",
+  "transactionDetailImages": "圖片"
 }

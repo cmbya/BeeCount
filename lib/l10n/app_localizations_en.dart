@@ -6,6 +6,19 @@ import 'app_localizations.dart';
 
 /// The translations for English (`en`).
 class AppLocalizationsEn extends AppLocalizations {
+  @override
+  String get transactionDetailImages => "Images";
+
+  @override
+  String get transactionDetailTitle => "Transaction details";
+
+  @override
+  String get transactionDetailCurrencyHint => "Changing currency clears the selected account and recalculates the ledger amount. A valid exchange rate is required. Continue?";
+
+  @override
+  String get transactionDetailSaveFailed => "Could not save. Check the selected references, permissions and exchange rate.";
+
+
   AppLocalizationsEn([String locale = 'en']) : super(locale);
 
   @override

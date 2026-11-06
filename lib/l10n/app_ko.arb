@@ -2171,5 +2171,9 @@
   "txFlagExcludeFromStatsHint": "통계에서는 제외되지만 잔액에는 계속 반영됩니다",
   "txFlagExcludeFromBudgetHint": "예산에는 반영되지 않습니다",
   "txFlagExcludedTag": "제외됨",
-  "txFlagBudgetExcludedTag": "예산 제외"
+  "txFlagBudgetExcludedTag": "예산 제외",
+  "transactionDetailTitle": "거래 상세",
+  "transactionDetailCurrencyHint": "통화를 변경하면 선택한 계좌가 해제되고 장부 금액이 다시 계산됩니다. 유효한 환율이 필요합니다. 계속할까요?",
+  "transactionDetailSaveFailed": "저장하지 못했습니다. 선택 항목, 권한 및 환율을 확인하세요.",
+  "transactionDetailImages": "이미지"
 }
