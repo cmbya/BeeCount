@@ -1637,4 +1637,58 @@ class RunnerTests: XCTestCase {
     XCTAssertTrue(SaveSingleBillingIntent.isDiscoverable)
   }
 
+  @available(iOS 16.0, *)
+  @MainActor
+  func testManualCategoryRulesUseLocalOperationAndPreserveInputValues() async throws {
+    for type in ["expense", "income"] {
+      var operations: [String] = []
+      let encoded = try await CustomBilling.draft(type: type, ledger: BillingLedger(id: 2, name: "家庭"),
+          category: nil, amount: "12.34", date: Date(timeIntervalSince1970: 1000), note: "原样备注",
+          account: BillingAccount(id: 1, name: "账户"), tags: [BillingTag(id: 4, name: "家庭")], excluded: true,
+          merchant: "商户线索", ruleText: "原始全文", call: { request in
+            let operation = request["operation"] as? String ?? ""
+            operations.append(operation)
+            if operation == "options" { return self.editorOptions(type, ledger: 2) }
+            XCTAssertEqual(operation, "classify")
+            XCTAssertEqual(request["ledgerId"] as? Int, 2)
+            XCTAssertEqual(request["type"] as? String, type)
+            XCTAssertEqual(request["note"] as? String, "原样备注")
+            XCTAssertEqual(request["merchant"] as? String, "商户线索")
+            XCTAssertEqual(request["ruleText"] as? String, "原始全文")
+            return ["status": "ok", "categoryId": 88, "warnings": [String]()]
+          })
+      let draft = try ConfirmedBilling.decode(encoded)
+      let candidate = try XCTUnwrap((draft["candidates"] as? [[String: Any]])?.first)
+      XCTAssertEqual(operations, ["options", "classify"])
+      XCTAssertEqual(candidate["categoryId"] as? Int, 88)
+      XCTAssertEqual(candidate["amountMinor"] as? Int, 1234)
+      XCTAssertEqual(candidate["note"] as? String, "原样备注")
+      XCTAssertEqual(candidate["tagIds"] as? [Int], [4])
+      XCTAssertEqual(candidate["excludeFromBudget"] as? Bool, type == "expense")
+    }
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testManualCategoryUnmatchedStaysUnclassifiedAndTransferSkipsRules() async throws {
+    for type in ["expense", "transfer"] {
+      var operations: [String] = []
+      let encoded = try await CustomBilling.draft(type: type, ledger: nil, category: nil,
+          amount: "1", date: nil, note: "无匹配备注", account: nil, tags: [], merchant: "商户", ruleText: "全文", call: { request in
+            let operation = request["operation"] as? String ?? ""
+            operations.append(operation)
+            if operation == "options" { return self.editorOptions(type) }
+            XCTAssertEqual(operation, "classify")
+            return ["status": "ok", "warnings": ["个人规则目标分类已失效"]]
+          })
+      let candidate = try XCTUnwrap(((try ConfirmedBilling.decode(encoded))["candidates"] as? [[String: Any]])?.first)
+      XCTAssertEqual(operations, type == "transfer" ? ["options"] : ["options", "classify"])
+      XCTAssertNil(candidate["categoryId"])
+      if type == "expense" { XCTAssertEqual(candidate["warnings"] as? [String], ["个人规则目标分类已失效"]) }
+    }
+    let intent = StartSingleBillingIntent()
+    XCTAssertNil(intent.merchant)
+    XCTAssertNil(intent.ruleText)
+  }
+
 }

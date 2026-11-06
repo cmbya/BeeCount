@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../../ai/providers/ai_provider_factory.dart';
+import '../../data/db.dart';
 import '../../data/repositories/local/local_repository.dart';
 import '../../providers.dart';
 import '../billing/category_matcher.dart';
@@ -31,6 +32,8 @@ class ShortcutService {
               type: input['type'] as String? ?? 'expense');
         case 'recognize':
           return await recognize(input);
+        case 'classify':
+          return await classify(input);
         case 'query':
           return await store.query(input['requestId'] as String);
         case 'recent':
@@ -136,6 +139,82 @@ class ShortcutService {
     };
   }
 
+  /// Shared, local-only path for both recognized and manually supplied fields.
+  /// Missing evidence stays missing: note is not invented as merchant/OCR text.
+  static int? _matchLocalCategory({
+    required String type,
+    required int ledgerId,
+    required String merchant,
+    required String note,
+    required String ruleText,
+    required List<Map<String, dynamic>> rules,
+    required List<Category> allUsable,
+    required List<String> warnings,
+  }) {
+    if (type == 'transfer') return null;
+    final usable = allUsable.where((c) => c.kind == type).toList();
+    for (final rule in rules) {
+      if (rule['enabled'] != 1 ||
+          allUsable.any((c) => c.id == rule['category_id'] && c.kind != type) ||
+          (rule['ledger_id'] != null && rule['ledger_id'] != ledgerId)) continue;
+      final source = switch (rule['field']) {
+        'merchant' => merchant,
+        'note' => note,
+        _ => ruleText
+      };
+      final key = (rule['keyword'] as String).toLowerCase();
+      final hit = rule['match_mode'] == 'exact'
+          ? source.toLowerCase() == key
+          : source.toLowerCase().contains(key);
+      if (!hit) continue;
+      if (!usable.any((c) => c.id == rule['category_id'])) {
+        warnings.add('个人规则目标分类已失效');
+        continue;
+      }
+      return rule['category_id'] as int;
+    }
+    return CategoryMatcher.smartMatch(
+        merchant: merchant, fullText: ruleText + ' ' + note, categories: usable);
+  }
+
+  /// Read-only category resolution. It never recognizes, commits or refreshes AI.
+  Future<Map<String, dynamic>> classify(Map<String, dynamic> input) async {
+    final type = input['type'] as String? ?? 'expense';
+    final opts = await options(input['ledgerId'] as int?, type: type);
+    for (final field in ['note', 'merchant', 'ruleText']) {
+      final value = input[field];
+      final maxLength = field == 'note' ? 10000 : 50000;
+      if (value != null && (value is! String || value.length > maxLength)) {
+        throw const ShortcutFailure('INVALID_REQUEST', '分类线索格式无效或过长');
+      }
+    }
+    final warnings = <String>[];
+    int? categoryId;
+    if (type != 'transfer') {
+      final allUsable = [
+        ...await repo.getUsableCategories('expense'),
+        ...await repo.getUsableCategories('income')
+      ];
+      final explicit = input['categoryId'];
+      if (explicit != null) {
+        if (explicit is! int ||
+            !allUsable.any((c) => c.id == explicit && c.kind == type)) {
+          throw const ShortcutFailure('INVALID_REFERENCE', '指定分类已失效或与收支类型不符');
+        }
+        categoryId = explicit;
+      } else {
+        categoryId = _matchLocalCategory(
+            type: type, ledgerId: opts['ledgerId'] as int,
+            merchant: input['merchant'] as String? ?? '',
+            note: input['note'] as String? ?? '',
+            ruleText: input['ruleText'] as String? ?? '',
+            rules: await store.rules(), allUsable: allUsable, warnings: warnings);
+      }
+    }
+    return {'status': 'ok', 'ledgerId': opts['ledgerId'], 'type': type,
+      'categoryId': categoryId, 'warnings': warnings};
+  }
+
   Future<Map<String, dynamic>> recognize(Map<String, dynamic> input) async {
     final opts = await options(input['ledgerId'] as int?);
     final isImage = input['mode'] == 'image';
@@ -227,7 +306,6 @@ class ShortcutService {
       final type = ['expense', 'income', 'transfer'].contains(value['type'])
           ? value['type'] as String
           : 'expense';
-      final usable = allUsable.where((c) => c.kind == type).toList();
       // Whole-page OCR must not overwrite several independent AI candidates.
       final candidateText = raw.length == 1 ? ruleText : '';
       final note = buildNote(value, sourceText: candidateText);
@@ -249,33 +327,10 @@ class ShortcutService {
       final currency = value['currency']?.toString().toUpperCase() ?? '';
       if (currency.isNotEmpty && currency != opts['currency'])
         warnings.add('识别币种与账本不一致，请核对后人工填写');
-      int? categoryId;
-      for (final rule in rules) {
-        if (type == 'transfer' ||
-            rule['enabled'] != 1 ||
-            allUsable
-                .any((c) => c.id == rule['category_id'] && c.kind != type) ||
-            (rule['ledger_id'] != null &&
-                rule['ledger_id'] != opts['ledgerId'])) continue;
-        final source = switch (rule['field']) {
-          'merchant' => merchant,
-          'note' => note,
-          _ => ruleText
-        };
-        final key = (rule['keyword'] as String).toLowerCase();
-        final hit = rule['match_mode'] == 'exact'
-            ? source.toLowerCase() == key
-            : source.toLowerCase().contains(key);
-        if (!hit) continue;
-        if (!usable.any((c) => c.id == rule['category_id'])) {
-          warnings.add('个人规则目标分类已失效');
-          continue;
-        }
-        categoryId = rule['category_id'] as int;
-        break;
-      }
-      categoryId ??= CategoryMatcher.smartMatch(
-          merchant: merchant, fullText: ruleText + ' ' + note, categories: usable);
+      int? categoryId = _matchLocalCategory(
+          type: type, ledgerId: opts['ledgerId'] as int, merchant: merchant,
+          note: note, ruleText: ruleText, rules: rules,
+          allUsable: allUsable, warnings: warnings);
       // AI IDs are suggestions, never trusted foreign keys. Name-only legacy
       // responses are accepted only if the complete candidate set is unique.
       categoryId ??= matchSuggestedCategory(categories, type: type,

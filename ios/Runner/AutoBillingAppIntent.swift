@@ -1239,7 +1239,7 @@ struct BillingTagQuery: EntityStringQuery {
 @available(iOS 16.0, *)
 @MainActor
 enum CustomBilling {
-    static func draft(type: String, ledger: BillingLedger?, category: BillingCategory?, amount: String?, date: Date?, note: String?, account: BillingAccount?, destination: BillingAccount? = nil, tags: [BillingTag]?, excluded: Bool = false,
+    static func draft(type: String, ledger: BillingLedger?, category: BillingCategory?, amount: String?, date: Date?, note: String?, account: BillingAccount?, destination: BillingAccount? = nil, tags: [BillingTag]?, excluded: Bool = false, merchant: String? = nil, ruleText: String? = nil,
                       call: ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call) async throws -> String {
         var request: [String: Any] = ["operation": "options", "type": type]
         if let ledger { request["ledgerId"] = ledger.id }
@@ -1247,7 +1247,16 @@ enum CustomBilling {
         let defaults = options["defaults"] as? [String: Any] ?? [:]
         var candidate: [String: Any] = ["type": type, "note": note ?? "", "excludeFromBudget": type == "expense" && excluded, "tagIds": tags?.map { $0.id } ?? defaults["tagIds"] as? [Int] ?? []]
         if let amount, !amount.isEmpty { candidate["amountMinor"] = try ConfirmedBilling.minor(amount, digits: options["minorDigits"] as? Int ?? 2) }
-        if let category { candidate["categoryId"] = category.id }
+        if let category {
+            // An explicit user choice always beats category rules.
+            candidate["categoryId"] = category.id
+        } else if type != "transfer", [note ?? "", merchant ?? "", ruleText ?? ""].contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            let matched = try await call(["operation": "classify", "type": type,
+                "ledgerId": options["ledgerId"]!, "note": note ?? "",
+                "merchant": merchant ?? "", "ruleText": ruleText ?? ""])
+            if let id = matched["categoryId"] as? Int { candidate["categoryId"] = id }
+            if let warnings = matched["warnings"] as? [String], !warnings.isEmpty { candidate["warnings"] = warnings }
+        }
         if let account { candidate["accountId"] = account.id }
         if let destination { candidate["toAccountId"] = destination.id }
         candidate["occurredAt"] = ISO8601DateFormatter().string(from: date ?? Date())
@@ -1272,6 +1281,8 @@ struct CustomExpenseBillingIntent: AppIntent {
     @Parameter(title: "金额") var amount: String?
     @Parameter(title: "时间") var date: Date?
     @Parameter(title: "备注") var note: String?
+    @Parameter(title: "商户（分类线索，可选）", inputConnectionBehavior: .never) var merchant: String?
+    @Parameter(title: "原始全文（分类线索，可选）", inputConnectionBehavior: .never) var ruleText: String?
     @Parameter(title: "账户") var account: BillingAccount?
     @Parameter(title: "标签") var tags: [BillingTag]?
     @Parameter(title: "不计预算", default: false) var excluded: Bool
@@ -1280,10 +1291,10 @@ struct CustomExpenseBillingIntent: AppIntent {
     @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
     @Parameter(title: "输入", default: "", inputConnectionBehavior: .never) var textValue: String
     static var parameterSummary: some ParameterSummary {
-        Summary("自定义支出账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$account; \.$tags; \.$excluded; \.$attachment; \.$templateMode }
+        Summary("自定义支出账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$merchant; \.$ruleText; \.$account; \.$tags; \.$excluded; \.$attachment; \.$templateMode }
     }
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog & OpensIntent {
-        let draft = try await CustomBilling.draft(type: "expense", ledger: ledger, category: category, amount: amount, date: date, note: note, account: account, destination: nil, tags: tags, excluded: excluded)
+        let draft = try await CustomBilling.draft(type: "expense", ledger: ledger, category: category, amount: amount, date: date, note: note, account: account, destination: nil, tags: tags, excluded: excluded, merchant: merchant, ruleText: ruleText)
         if templateMode { return BillingHandoff.plain(try BillingStepFlow.start(draft), dialog: IntentDialog("")) }
         let state = try BillingStepFlow.start(draft)
         return try await BillingHandoff.start(state, attachment: attachment, choose: { values, prompt in
@@ -1305,6 +1316,8 @@ struct CustomIncomeBillingIntent: AppIntent {
     @Parameter(title: "金额") var amount: String?
     @Parameter(title: "时间") var date: Date?
     @Parameter(title: "备注") var note: String?
+    @Parameter(title: "商户（分类线索，可选）", inputConnectionBehavior: .never) var merchant: String?
+    @Parameter(title: "原始全文（分类线索，可选）", inputConnectionBehavior: .never) var ruleText: String?
     @Parameter(title: "账户") var account: BillingAccount?
     @Parameter(title: "标签") var tags: [BillingTag]?
     @Parameter(title: "附带图片", inputConnectionBehavior: .never) var attachment: IntentFile?
@@ -1312,10 +1325,10 @@ struct CustomIncomeBillingIntent: AppIntent {
     @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
     @Parameter(title: "输入", default: "", inputConnectionBehavior: .never) var textValue: String
     static var parameterSummary: some ParameterSummary {
-        Summary("自定义收入账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$account; \.$tags; \.$attachment; \.$templateMode }
+        Summary("自定义收入账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$merchant; \.$ruleText; \.$account; \.$tags; \.$attachment; \.$templateMode }
     }
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog & OpensIntent {
-        let draft = try await CustomBilling.draft(type: "income", ledger: ledger, category: category, amount: amount, date: date, note: note, account: account, destination: nil, tags: tags, excluded: false)
+        let draft = try await CustomBilling.draft(type: "income", ledger: ledger, category: category, amount: amount, date: date, note: note, account: account, destination: nil, tags: tags, excluded: false, merchant: merchant, ruleText: ruleText)
         if templateMode { return BillingHandoff.plain(try BillingStepFlow.start(draft), dialog: IntentDialog("")) }
         let state = try BillingStepFlow.start(draft)
         return try await BillingHandoff.start(state, attachment: attachment, choose: { values, prompt in
@@ -2027,6 +2040,8 @@ struct StartSingleBillingIntent: AppIntent {
     @Parameter(title: "账本") var ledger: BillingLedger?
     @Parameter(title: "金额（手填模式）", inputConnectionBehavior: .never) var amount: String?
     @Parameter(title: "备注（手填模式）", inputConnectionBehavior: .never) var note: String?
+    @Parameter(title: "商户（手填分类线索，可选）", inputConnectionBehavior: .never) var merchant: String?
+    @Parameter(title: "原始全文（手填分类线索，可选）", inputConnectionBehavior: .never) var ruleText: String?
     @Parameter(title: "时间（手填模式）") var date: Date?
     @Parameter(title: "分类（手填模式）") var category: BillingCategory?
     @Parameter(title: "账户（手填模式）") var account: BillingAccount?
@@ -2036,7 +2051,7 @@ struct StartSingleBillingIntent: AppIntent {
     @Parameter(title: "不计预算（支出，留空跟随 App）") var excluded: Bool?
     @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
     static var parameterSummary: some ParameterSummary {
-        Summary("开始\(\.$source)单笔草稿") { \.$image; \.$text; \.$ledger; \.$amount; \.$note; \.$date; \.$category; \.$account; \.$destination; \.$tags; \.$clearTags; \.$excluded }
+        Summary("开始\(\.$source)单笔草稿") { \.$image; \.$text; \.$ledger; \.$amount; \.$note; \.$merchant; \.$ruleText; \.$date; \.$category; \.$account; \.$destination; \.$tags; \.$clearTags; \.$excluded }
     }
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<SingleBillingStep> {
         let config = RecognitionBillingFlow.configuration(ledger: ledger, tags: tags, clearTags: clearTags, excluded: excluded)
@@ -2055,7 +2070,7 @@ struct StartSingleBillingIntent: AppIntent {
             let defaults = options["defaults"] as? [String: Any] ?? [:]
             let effectiveTags = clearTags ? [BillingTag]() : tags
             let draft = try await CustomBilling.draft(type: type, ledger: ledger, category: category, amount: amount, date: date, note: note, account: account,
-                destination: destination, tags: effectiveTags, excluded: excluded ?? (defaults["excludeFromBudget"] as? Bool ?? false))
+                destination: destination, tags: effectiveTags, excluded: excluded ?? (defaults["excludeFromBudget"] as? Bool ?? false), merchant: merchant, ruleText: ruleText)
             state = try BillingStepFlow.start(draft, showIncompleteDraft: true, singleOnly: true)
         }
         return .result(value: try SingleBillingStep(state))
