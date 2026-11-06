@@ -102,12 +102,12 @@ class RunnerTests: XCTestCase {
   @available(iOS 16.0, *)
   @MainActor
   func testEditorRejectsOversizeSplitAndRecomputesAfterDelete() async throws {
-    var choices = ["拆分或新增明细", "金额", "分类", "1. 餐饮", "完成此笔", "返回修改", "金额", "完成此笔",
+    var choices = ["拆分或新增明细", "金额", "返回修改", "金额", "分类", "1. 餐饮", "完成此笔",
       "删除明细", "第 1 笔 80.00", "拆分或新增明细", "分类", "1. 餐饮", "完成此笔", "确认提交"]
     var inputs = ["400", "80"]
     var rejected = false
     let editor = ConfirmedBillingEditor(draft: try editorDraft(), choose: { values, prompt in
-      if prompt.contains("超过剩余金额") { rejected = true }
+      if prompt.contains("不能超过可分配金额") { rejected = true }
       let selected = self.menuValue(choices.removeFirst(), values); XCTAssertTrue(values.contains(selected), selected); return selected
     }, input: { _ in inputs.removeFirst() }, call: { request in
       request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions()
@@ -584,6 +584,193 @@ class RunnerTests: XCTestCase {
       let result = try ConfirmedBilling.decode(await editor.runEditor())
       XCTAssertEqual((result["entries"] as? [[String: Any]])?.first?["note"] as? String, "直接替换")
       XCTAssertEqual(inputCount, 1)
+      XCTAssertTrue(choices.isEmpty)
+    }
+  }
+
+  // These tests use supplied menu/input responses, not the Shortcuts keyboard UI.
+  @available(iOS 16.0, *)
+  @MainActor
+  func testStepInputSuspendsAndReplaysWithoutRepeatingMenus() async throws {
+    var choices = ["备注", "金额", "确认提交"]
+    var validated = 0
+    let draft = try editorDraft()
+    let choose: ([String], String) async throws -> String = { values, _ in
+      let action = choices.removeFirst()
+      let selected = self.menuValue(action, values)
+      XCTAssertTrue(values.contains(selected)); return selected
+    }
+    let call: ([String: Any]) async throws -> [String: Any] = { request in
+      if request["operation"] as? String == "validate" { validated += 1; return ["status": "valid"] }
+      XCTAssertEqual(request["operation"] as? String, "options")
+      return self.editorOptions()
+    }
+    let start = try BillingStepFlow.start(draft)
+    let first = try await BillingStepFlow.advance(start, response: nil, hasResponse: false, choose: choose, call: call)
+    var result = try ConfirmedBilling.decode(first)
+    XCTAssertEqual(result["status"] as? String, "input")
+    XCTAssertEqual((result["input"] as? [String: Any])?["currentValue"] as? String, "原文")
+    XCTAssertEqual(validated, 0)
+    let second = try await BillingStepFlow.advance(first, response: "改好备注", hasResponse: true, choose: choose, call: call)
+    result = try ConfirmedBilling.decode(second)
+    XCTAssertEqual((result["input"] as? [String: Any])?["inputType"] as? String, "number")
+    XCTAssertEqual((result["input"] as? [String: Any])?["currentValue"] as? String, "300.00")
+    let final = try await BillingStepFlow.advance(second, response: "127.89", hasResponse: true, choose: choose, call: call)
+    result = try ConfirmedBilling.decode(final)
+    XCTAssertEqual(result["status"] as? String, "confirmed")
+    let submission = try ConfirmedBilling.decode(try XCTUnwrap(result["submission"] as? String))
+    let entry = try XCTUnwrap((submission["entries"] as? [[String: Any]])?.first)
+    XCTAssertEqual(entry["note"] as? String, "改好备注")
+    XCTAssertEqual(entry["amountMinor"] as? Int, 12789)
+    XCTAssertEqual(submission["requestId"] as? String, try ConfirmedBilling.decode(draft)["requestId"] as? String)
+    XCTAssertEqual(validated, 1)
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testStepSplitResumesInsideDetailAndRejectsOversize() async throws {
+    var choices = ["拆分或新增明细", "金额", "返回修改", "金额", "备注", "完成此笔",
+      "拆分或新增明细", "金额", "完成此笔", "拆分或新增明细", "完成此笔", "确认提交"]
+    let answers = ["400", "80", "第一笔", "150"]
+    let defaults = ["300.00", "300.00", "原文", "220.00"]
+    var envelope = try BillingStepFlow.start(editorDraft())
+    var response: String? = nil
+    var hasResponse = false
+    var inputs = 0
+    for _ in 0..<10 {
+      envelope = try await BillingStepFlow.advance(envelope, response: response, hasResponse: hasResponse, choose: { values, _ in
+        XCTAssertFalse(values.contains("开始拆分"))
+        let selected = self.menuValue(choices.removeFirst(), values)
+        XCTAssertTrue(values.contains(selected)); return selected
+      }, call: { request in request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions() })
+      let result = try ConfirmedBilling.decode(envelope)
+      if result["status"] as? String == "confirmed" { break }
+      XCTAssertEqual(result["status"] as? String, "input")
+      XCTAssertLessThan(inputs, answers.count)
+      XCTAssertEqual((result["input"] as? [String: Any])?["currentValue"] as? String, defaults[inputs])
+      response = answers[inputs]; inputs += 1; hasResponse = true
+    }
+    let result = try ConfirmedBilling.decode(envelope)
+    let submission = try ConfirmedBilling.decode(try XCTUnwrap(result["submission"] as? String))
+    let entries = try XCTUnwrap(submission["entries"] as? [[String: Any]])
+    XCTAssertEqual(entries.compactMap { $0["amountMinor"] as? Int }, [8000, 15000, 7000])
+    XCTAssertEqual(entries[0]["note"] as? String, "第一笔")
+    XCTAssertEqual(inputs, 4)
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testStepEmptyNoteAndCancellationNeverCommit() async throws {
+    let start = try BillingStepFlow.start(editorDraft())
+    let pending = try await BillingStepFlow.advance(start, response: nil, hasResponse: false, choose: { values, _ in
+      self.menuValue("备注", values)
+    }, call: { _ in self.editorOptions() })
+    let cancelled = try await BillingStepFlow.advance(pending, response: nil, hasResponse: true, choose: { values, _ in
+      XCTAssertTrue(values.contains("备注："))
+      return "取消提交"
+    }, call: { request in
+      XCTAssertEqual(request["operation"] as? String, "options")
+      return self.editorOptions()
+    })
+    XCTAssertEqual(try ConfirmedBilling.decode(cancelled)["status"] as? String, "cancelled")
+    do {
+      _ = try await BillingStepFlow.advance(pending, response: nil, hasResponse: false, choose: { _, _ in XCTFail("Must reject missing response"); return "" }, call: { _ in self.editorOptions() })
+      XCTFail("Must require explicit response flag")
+    } catch {}
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testStepExistingDetailAmountLimitAndFailedValidationReplay() async throws {
+    var choices = ["拆分或新增明细", "金额", "完成此笔", "拆分或新增明细", "完成此笔",
+      "编辑明细", "第 1 笔 80.00", "金额", "返回修改", "金额", "完成此笔",
+      "确认提交", "返回修改", "编辑明细", "第 1 笔 80.00", "备注", "完成此笔", "确认提交"]
+    let answers = ["80", "100", "80", "保持本笔"]
+    var resultText = try BillingStepFlow.start(editorDraft())
+    var response: String? = nil
+    var hasResponse = false
+    var inputIndex = 0
+    var validations = 0
+    for _ in 0..<10 {
+      resultText = try await BillingStepFlow.advance(resultText, response: response, hasResponse: hasResponse, choose: { values, _ in
+        let selected = self.menuValue(choices.removeFirst(), values)
+        XCTAssertTrue(values.contains(selected)); return selected
+      }, call: { request in
+        if request["operation"] as? String == "validate" {
+          validations += 1
+          if validations == 1 { throw NSError(domain: "test", code: 1) }
+          return ["status": "valid"]
+        }
+        return self.editorOptions()
+      })
+      let result = try ConfirmedBilling.decode(resultText)
+      if result["status"] as? String == "confirmed" { break }
+      if inputIndex == 2 { XCTAssertEqual((result["input"] as? [String: Any])?["currentValue"] as? String, "80.00") }
+      response = answers[inputIndex]; inputIndex += 1; hasResponse = true
+    }
+    let result = try ConfirmedBilling.decode(resultText)
+    let submission = try ConfirmedBilling.decode(try XCTUnwrap(result["submission"] as? String))
+    let entries = try XCTUnwrap(submission["entries"] as? [[String: Any]])
+    XCTAssertEqual(entries.compactMap { $0["amountMinor"] as? Int }, [8000, 22000])
+    XCTAssertEqual(entries[0]["note"] as? String, "保持本笔")
+    XCTAssertEqual(validations, 2)
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testStepFlowRetainsManualIncomeTransferAndMissingAmount() async throws {
+    for type in ["income", "transfer"] {
+      var source = try ConfirmedBilling.decode(editorDraft(type))
+      var candidates = try XCTUnwrap(source["candidates"] as? [[String: Any]])
+      candidates[0]["note"] = "手填原样"
+      if type == "transfer" { candidates[0]["toAccountId"] = 2 }
+      source["candidates"] = candidates
+      var choices = ["备注", "确认提交"]
+      let start = try BillingStepFlow.start(ConfirmedBilling.encode(source))
+      let choose: ([String], String) async throws -> String = { values, _ in
+        let selected = self.menuValue(choices.removeFirst(), values)
+        XCTAssertTrue(values.contains(selected)); return selected
+      }
+      let call: ([String: Any]) async throws -> [String: Any] = { request in
+        XCTAssertNotEqual(request["operation"] as? String, "recognize")
+        return request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions(type)
+      }
+      let input = try await BillingStepFlow.advance(start, response: nil, hasResponse: false, choose: choose, call: call)
+      XCTAssertEqual((try ConfirmedBilling.decode(input)["input"] as? [String: Any])?["currentValue"] as? String, "手填原样")
+      let final = try await BillingStepFlow.advance(input, response: "新备注", hasResponse: true, choose: choose, call: call)
+      XCTAssertEqual(try ConfirmedBilling.decode(final)["status"] as? String, "confirmed")
+      XCTAssertTrue(choices.isEmpty)
+    }
+    var source = try ConfirmedBilling.decode(editorDraft())
+    var candidates = try XCTUnwrap(source["candidates"] as? [[String: Any]])
+    candidates[0].removeValue(forKey: "amountMinor")
+    source["candidates"] = candidates
+    let missing = try await BillingStepFlow.advance(BillingStepFlow.start(ConfirmedBilling.encode(source)), response: nil, hasResponse: false,
+      choose: { _, _ in XCTFail("Amount must be requested first"); return "" }, call: { _ in self.editorOptions() })
+    XCTAssertEqual((try ConfirmedBilling.decode(missing)["input"] as? [String: Any])?["inputType"] as? String, "number")
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testStepInvalidAmountsKeepOriginalAndRequestAgain() async throws {
+    for invalid in ["0", "-1", "1.001", "abc", ""] {
+      var choices = ["金额", "返回修改", "金额", "确认提交"]
+      let choose: ([String], String) async throws -> String = { values, _ in
+        let selected = self.menuValue(choices.removeFirst(), values)
+        XCTAssertTrue(values.contains(selected)); return selected
+      }
+      let call: ([String: Any]) async throws -> [String: Any] = { request in
+        request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions()
+      }
+      let start = try BillingStepFlow.start(editorDraft())
+      let first = try await BillingStepFlow.advance(start, response: nil, hasResponse: false, choose: choose, call: call)
+      let retry = try await BillingStepFlow.advance(first, response: invalid, hasResponse: true, choose: choose, call: call)
+      XCTAssertEqual((try ConfirmedBilling.decode(retry)["input"] as? [String: Any])?["currentValue"] as? String, "300.00")
+      let final = try await BillingStepFlow.advance(retry, response: "300.00", hasResponse: true, choose: choose, call: call)
+      XCTAssertEqual(try ConfirmedBilling.decode(final)["status"] as? String, "confirmed")
       XCTAssertTrue(choices.isEmpty)
     }
   }
