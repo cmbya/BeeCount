@@ -260,6 +260,8 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
       return;
     }
     final ledgerId = ref.read(currentLedgerIdProvider);
+    final ledger = await ref.read(currentLedgerProvider.future);
+    if (!mounted || ledger == null) return;
 
     // 确定初始账户ID（新建时使用默认账户，编辑时保持原值）
     int? initialAccountId = widget.initialAccountId;
@@ -268,6 +270,8 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
       initialAccountId = await _getDefaultAccountId(kind, ledgerId);
     }
 
+    if (!mounted) return;
+    final editContainer = ProviderScope.containerOf(context, listen: false);
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -275,7 +279,9 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (ctx) => AmountEditorSheet(
+      builder: (ctx) => UncontrolledProviderScope(
+        container: editContainer,
+        child: AmountEditorSheet(
         categoryName: c.name,
         categoryId: c.id,
         categorySyncId: c.id < 0 ? c.syncId : null,
@@ -460,6 +466,7 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
           HapticFeedback.lightImpact();
           SystemSound.play(SystemSoundType.click);
         },
+      ),
       ),
     );
   }

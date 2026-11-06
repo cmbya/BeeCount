@@ -18,7 +18,7 @@ final canCreateTagForCurrentLedgerProvider = Provider<bool>((ref) {
   final ledger = ref.watch(currentLedgerProvider).unwrapPrevious().valueOrNull;
   if (ledger == null) return false;
   return !ledger.isShared || ledger.myRole == 'owner';
-});
+}, dependencies: [currentLedgerProvider]);
 
 /// 所有标签列表 Provider（响应式）
 final allTagsStreamProvider = StreamProvider<List<Tag>>((ref) {
@@ -45,7 +45,7 @@ final tagsForCurrentLedgerProvider = FutureProvider<List<Tag>>((ref) async {
   final ledgerId = ref.watch(currentLedgerIdProvider);
   final ctx = await repo.db.loadLedgerPickerContext(ledgerId);
   return repo.db.filterTagsForLedger(all, ctx);
-});
+}, dependencies: [currentLedgerIdProvider]);
 
 /// 标签列表带统计信息 Provider（响应式）
 /// 返回每个标签及其关联的交易数量
@@ -114,7 +114,7 @@ final recentTagsForCurrentLedgerProvider = FutureProvider<List<Tag>>((ref) async
     );
   }
   return repo.getRecentlyUsedTags(limit: 10);
-});
+}, dependencies: [currentLedgerIdProvider]);
 
 /// 最近使用的标签 Provider
 /// 用于标签选择器快速选择

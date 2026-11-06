@@ -3903,5 +3903,7 @@
   "transactionDetailTitle": "Transaction details",
   "transactionDetailCurrencyHint": "Changing currency clears the selected account and recalculates the ledger amount. A valid exchange rate is required. Continue?",
   "transactionDetailSaveFailed": "Could not save. Check the selected references, permissions and exchange rate.",
-  "transactionDetailImages": "Images"
+  "transactionDetailImages": "Images",
+  "transactionDetailImagesFailed": "Images were not saved. Check storage and the images, then retry.",
+  "transactionDetailImagesPartial": "Some images were not saved. Check saved images before adding the missing ones."
 }

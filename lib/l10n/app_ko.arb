@@ -2175,5 +2175,7 @@
   "transactionDetailTitle": "거래 상세",
   "transactionDetailCurrencyHint": "통화를 변경하면 선택한 계좌가 해제되고 장부 금액이 다시 계산됩니다. 유효한 환율이 필요합니다. 계속할까요?",
   "transactionDetailSaveFailed": "저장하지 못했습니다. 선택 항목, 권한 및 환율을 확인하세요.",
-  "transactionDetailImages": "이미지"
+  "transactionDetailImages": "이미지",
+  "transactionDetailImagesFailed": "이미지를 저장하지 못했습니다. 저장 공간과 이미지를 확인한 후 다시 시도하세요.",
+  "transactionDetailImagesPartial": "일부 이미지를 저장하지 못했습니다. 저장된 이미지를 확인한 후 누락된 이미지를 추가하세요."
 }

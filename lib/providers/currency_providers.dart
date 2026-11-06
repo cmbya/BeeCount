@@ -141,7 +141,7 @@ final currentLedgerCurrencyProvider = Provider<String>((ref) {
   final ledger = ref.watch(currentLedgerProvider).valueOrNull;
   final c = ledger?.currency;
   return (c == null || c.isEmpty) ? 'CNY' : c.toUpperCase();
-});
+}, dependencies: [currentLedgerProvider]);
 
 /// 以**账本本位币**为 base 的有效汇率(账户/交易币种 → 账本本位币)。
 /// 结构同 [effectiveRatesProvider],仅 base 从用户主币种换成账本本位币;
@@ -164,7 +164,7 @@ final effectiveRatesForLedgerProvider =
       for (final o in overrides) (quote: o.quoteCurrency, rate: o.rate)
     ],
   );
-});
+}, dependencies: [currentLedgerCurrencyProvider]);
 
 /// 当前账本「未折算外币交易」条数(L11 检测):>0 时统计页显示补折算横幅。
 /// watch statsRefresh(重算完成/交易变动后重查)。

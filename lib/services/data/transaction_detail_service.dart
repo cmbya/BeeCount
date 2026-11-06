@@ -18,6 +18,7 @@ class TransactionDetailService {
       if (tx == null) throw StateError('not_found');
       final ledger = await repo.getLedgerById(tx.ledgerId);
       if (ledger == null || !canEdit(ledger)) throw StateError('read_only');
+      final storedCurrency = await transactionCurrency(repo, tx, ledger);
       if (patch.containsKey('ledgerId')) {
         final target = await repo.getLedgerById(patch['ledgerId'] as int);
         if (target == null || !canEdit(target)) throw StateError('read_only');
@@ -25,7 +26,7 @@ class TransactionDetailService {
         // reference remap workflow. Never carry incompatible overrides silently.
         if (target.id != ledger.id && (target.isShared || ledger.isShared)) throw StateError('shared_move');
         if (target.id != ledger.id) {
-          final currency = tx.currencyCode ?? ledger.currency;
+          final currency = storedCurrency;
           final native = await _native(repo, tx.amount, currency, target.currency);
           await repo.updateTransactionLedger(id: id, ledgerId: target.id);
           await repo.updateTransaction(id: id, type: tx.type, amount: tx.amount,
@@ -42,13 +43,13 @@ class TransactionDetailService {
       final hasAccount = patch.containsKey('account');
       final toAccount = patch['toAccount'] as Account?;
       final hasToAccount = patch.containsKey('toAccount');
-      final storedCurrency = tx.currencyCode ?? ((tx.accountSyncIdOverride != null || tx.accountId != null) ? await repo.getAccountCurrencyByAnyId(tx.accountSyncIdOverride != null ? syntheticIdForSyncId(tx.accountSyncIdOverride!) : tx.accountId!) : null) ?? ledger.currency;
       final currency = (patch['currency'] as String? ?? storedCurrency).toUpperCase();
       if (!RegExp(r'^[A-Z]{3}$').hasMatch(currency)) throw StateError('currency');
       final amount = patch['amount'] as double? ?? tx.amount;
       if (!amount.isFinite || amount <= 0) throw StateError('amount');
       final digits = NumberFormat.simpleCurrency(name: currency).decimalDigits ?? 2;
-      if (patch.containsKey('amount') && (amount - double.parse(amount.toStringAsFixed(digits))).abs() > 0.00000001) throw StateError('amount');
+      if ((patch.containsKey('amount') || patch.containsKey('currency')) &&
+          (amount - double.parse(amount.toStringAsFixed(digits))).abs() > 0.00000001) throw StateError('amount');
       if (hasCategory && category != null && category.kind != tx.type) throw StateError('category');
       if (patch['excludeFromBudget'] == true && tx.type != 'expense') throw StateError('flags');
       if (patch['excludeFromStats'] == true && tx.type == 'transfer') throw StateError('flags');
@@ -115,6 +116,28 @@ class TransactionDetailService {
     }
     if (repo is LocalRepository) { await repo.db.transaction(write); }
     else { await write(); }
+  }
+
+  /// Legacy transactions may lack currencyCode. Resolve from their real
+  /// (including shared synthetic) payment account before using the ledger base.
+  static Future<String> transactionCurrency(BaseRepository repo, Transaction tx, Ledger ledger) async {
+    final explicit = tx.currencyCode?.trim();
+    if (explicit != null && explicit.isNotEmpty) return explicit.toUpperCase();
+    final accountId = tx.accountSyncIdOverride != null
+        ? syntheticIdForSyncId(tx.accountSyncIdOverride!) : tx.accountId;
+    final accountCurrency = accountId == null ? null : await repo.getAccountCurrencyByAnyId(accountId);
+    return (accountCurrency?.isNotEmpty == true ? accountCurrency! : ledger.currency).toUpperCase();
+  }
+
+  /// A transaction tag reader already includes shared overrides. De-duplicate
+  /// without conflating unrelated tags that happen to share a display name.
+  static List<Tag> uniqueTags(Iterable<Tag> tags) {
+    final result = <String, Tag>{};
+    for (final tag in tags) {
+      final key = tag.syncId?.isNotEmpty == true ? 'sync:${tag.syncId}' : 'id:${tag.id}';
+      result.putIfAbsent(key, () => tag);
+    }
+    return result.values.toList();
   }
 
   static Future<double> _native(BaseRepository repo, double amount, String currency, String base) async {

@@ -7,6 +7,13 @@ import 'app_localizations.dart';
 /// The translations for English (`en`).
 class AppLocalizationsEn extends AppLocalizations {
   @override
+  String get transactionDetailImagesFailed => "Images were not saved. Check storage and the images, then retry.";
+
+  @override
+  String get transactionDetailImagesPartial => "Some images were not saved. Check saved images before adding the missing ones.";
+
+
+  @override
   String get transactionDetailImages => "Images";
 
   @override

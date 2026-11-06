@@ -7,6 +7,13 @@ import 'app_localizations.dart';
 /// The translations for Chinese (`zh`).
 class AppLocalizationsZh extends AppLocalizations {
   @override
+  String get transactionDetailImagesFailed => "图片未保存成功，请检查存储空间和图片后重试。";
+
+  @override
+  String get transactionDetailImagesPartial => "部分图片未保存成功，请核对已保存图片后补充缺失项。";
+
+
+  @override
   String get transactionDetailImages => "图片";
 
   @override
@@ -8690,6 +8697,13 @@ class AppLocalizationsZh extends AppLocalizations {
 
 /// The translations for Chinese, as used in Taiwan (`zh_TW`).
 class AppLocalizationsZhTw extends AppLocalizationsZh {
+  @override
+  String get transactionDetailImagesFailed => "圖片未儲存成功，請檢查儲存空間與圖片後重試。";
+
+  @override
+  String get transactionDetailImagesPartial => "部分圖片未儲存成功，請核對已儲存圖片後補上缺少的項目。";
+
+
   @override
   String get transactionDetailImages => "圖片";
 

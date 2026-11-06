@@ -73,11 +73,9 @@ class _TransactionDetailPageState extends ConsumerState<TransactionDetailPage> {
           if (!accounts.any((a) => a.id == account.id)) accounts = [...accounts, account];
         }
         tags = await repo.db.filterTagsForLedger(tags, scope);
-        if (tx.syncId != null) {
-          final overrides = await (repo.db.select(repo.db.transactionTagOverrides)..where((r) => r.transactionSyncId.equals(tx.syncId!))).get();
-          selectedTags = [...selectedTags, ...tags.where((t) => overrides.any((o) => t.syncId == o.tagSyncId))];
-        }
+
       }
+      selectedTags = TransactionDetailService.uniqueTags(selectedTags);
       final attachments = await repo.getAttachmentsByTransaction(tx.id);
       if (mounted) setState(() { _data = _DetailData(tx, ledger, categories, accounts, tags, selectedTags, attachments); _loading = false; _failed = false; });
     } catch (_) {
@@ -256,7 +254,10 @@ class _TransactionDetailPageState extends ConsumerState<TransactionDetailPage> {
         final latest = await repo.getTransactionById(widget.transactionId);
         final ledger = latest == null ? null : await repo.getLedgerById(latest.ledgerId);
         if (ledger == null || !TransactionDetailService.canEdit(ledger)) throw StateError('read_only');
-        await service.saveAttachments(transactionId: widget.transactionId, sourceFiles: files, startIndex: 0);
+        final saved = await service.saveAttachments(transactionId: widget.transactionId, sourceFiles: files, startIndex: 0);
+        if (mounted && saved.length != files.length) {
+          showToast(context, saved.isEmpty ? l10n.transactionDetailImagesFailed : l10n.transactionDetailImagesPartial);
+        }
         if (mounted) { _refresh(_data!.ledger.id); await _reload(); }
       } catch (_) { if (mounted) showToast(context, l10n.commonFailed); }
       finally { if (mounted) setState(() => _busy = false); }

@@ -114,4 +114,48 @@ void main() {
     expect((await repo.getTransactionById(id))!.toAccountId, next);
   });
 
+  test('legacy foreign transaction keeps account currency when moving ledgers', () async {
+    final usd = await repo.createAccount(ledgerId: ledger, name: '美元账户', type: 'bank_card', currency: 'USD');
+    await (db.update(db.transactions)..where((r) => r.id.equals(id))).write(
+      TransactionsCompanion(accountId: d.Value(usd), currencyCode: const d.Value(null), nativeAmount: const d.Value(null)));
+    final next = await repo.createLedger(name: '目标外币账本', currency: 'CNY');
+    await repo.setOverride(base: 'CNY', quote: 'USD', rate: '7');
+    await TransactionDetailService.update(repo, id, {'ledgerId': next});
+    final tx = (await repo.getTransactionById(id))!;
+    expect(tx.currencyCode, 'USD'); expect(tx.accountId, usd); expect(tx.ledgerId, next);
+    expect(tx.nativeAmount, closeTo(127.89 * 7, 0.000001));
+  });
+
+  test('currency-only edits validate the new currency precision before writes', () async {
+    await repo.setOverride(base: 'CNY', quote: 'JPY', rate: '0.05');
+    await expectLater(TransactionDetailService.update(repo, id, {'currency': 'JPY'}), throwsStateError);
+    var tx = (await repo.getTransactionById(id))!;
+    expect(tx.amount, 127.89); expect(tx.currencyCode, 'CNY'); expect(tx.accountId, account);
+    await TransactionDetailService.update(repo, id, {'amount': 100.0});
+    await TransactionDetailService.update(repo, id, {'currency': 'JPY'});
+    tx = (await repo.getTransactionById(id))!;
+    expect(tx.currencyCode, 'JPY'); expect(tx.amount, 100); expect(tx.accountId, isNull); expect(tx.nativeAmount, 5);
+  });
+
+  test('tag de-duplication preserves order and does not merge names', () async {
+    final first = await repo.createTag(name: '一');
+    final second = await repo.createTag(name: '二');
+    final tags = await repo.getAllTags();
+    final a = tags.firstWhere((t) => t.id == first);
+    final b = tags.firstWhere((t) => t.id == second);
+    expect(TransactionDetailService.uniqueTags([a, a, b, b]).map((t) => t.id), [first, second]);
+  });
+
+  test('shared tag returned twice is collapsed by sync identity, not display name', () async {
+    final ids = [await repo.createTag(name: '同名甲'), await repo.createTag(name: '同名乙')];
+    final tags = await repo.getAllTags();
+    final first = tags.firstWhere((t) => t.id == ids[0]);
+    final other = tags.firstWhere((t) => t.id == ids[1]);
+    final mirrored = first.copyWith(id: -123, name: '相同显示名称');
+    final renamedOther = other.copyWith(name: '相同显示名称');
+    final selected = TransactionDetailService.uniqueTags([mirrored, mirrored, renamedOther]);
+    expect(selected.length, 2);
+    expect(selected.first.id, -123);
+  });
+
 }

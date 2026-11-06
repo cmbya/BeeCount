@@ -16279,6 +16279,8 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Generate receipt'**
   String get transactionDetailImages;
+  String get transactionDetailImagesFailed;
+  String get transactionDetailImagesPartial;
   String get transactionDetailTitle;
   String get transactionDetailCurrencyHint;
   String get transactionDetailSaveFailed;

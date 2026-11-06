@@ -19,3 +19,13 @@
 新增 transaction_detail_service_test.dart 覆盖备注清空、保留引用/快照、标记独立、无效金额、只读权限、转账端点、标签及个人账本移动；transaction_detail_page_test.dart 覆盖列表打开详情不自动弹金额键盘、备注预填与取消不写入。
 
 本轮仅静态核对本地化键、引用路径、括号及改动范围；没有安装依赖、运行 Flutter/Dart 测试、分析器或编译。没有模拟器/真机截图，不能据此声明布局与交互已实测通过。提交包含 [skip ci]，不触发构建发布。目标设备需验证小屏/大字/深色、逐行编辑、图片增删、转账、外币与共享权限、返回列表刷新。
+
+## 复查修正（不编译）
+
+- 编辑会话 currentLedgerId 的作用域依赖链已声明（账本、币种、汇率、标签权限/列表），金额与标签选择弹窗显式继承同一 ProviderContainer；转账金额弹窗相同。打开金额前等待所属账本加载，不以加载中的 CNY 兜底计算。
+- 移动旧外币账单与普通编辑共用 transactionCurrency：显式币种 → 实际账户（含共享 synthetic）币种 → 账本币种。切币种也必须满足目标币种小数位，不静默舍入。
+- getTagsForTransaction 已含共享 override，不再手工重复追加，按 syncId/id 去重。附件保存检查返回数量，零成功和部分成功分别明确提示并刷新实际数据。
+- 银行卡 bank_card 类型作为 debit 线索参与匹配，信用卡线索不再选入这种账户；多候选仍需选择，不用默认账户兜底。
+- 专用 Actions 的 Linux 测试显式包含详情 service/widget 与编辑作用域用例；独立 macOS Native billing tests 运行 RunnerTests，保存日志与 xcresult。发布需 Flutter、原生测试、IPA 编译三项成功；原生逻辑测试仍不等于快捷指令系统输入框真机验收。
+
+本次只提交源码/测试/工作流定义，提交含 [skip ci]；未在设备安装依赖、运行 Flutter/Xcode、触发 Actions 或发布。工作流首次运行和真机交互仍待验证。

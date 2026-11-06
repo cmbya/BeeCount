@@ -154,14 +154,18 @@ class _TransferFormState extends ConsumerState<TransferForm> {
 
     final repo = ref.read(repositoryProvider);
     final ledgerId = ref.read(currentLedgerIdProvider);
+    final ledger = await ref.read(currentLedgerProvider.future);
 
-    if (!mounted) return;
+    if (!mounted || ledger == null) return;
 
+    final editContainer = ProviderScope.containerOf(context, listen: false);
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: BeeTokens.surfaceSheet(context),
-      builder: (context) => AmountEditorSheet(
+      builder: (context) => UncontrolledProviderScope(
+        container: editContainer,
+        child: AmountEditorSheet(
         categoryName: l10n.transferTitle,
         initialDate: widget.initialDate ?? DateTime.now(),
         initialAmount: widget.initialAmount,
@@ -325,6 +329,7 @@ class _TransferFormState extends ConsumerState<TransferForm> {
             }
           }
         },
+      ),
       ),
     );
   }

@@ -51,7 +51,7 @@ jobs:
           require(run['status'] == 'completed' and run['conclusion'] == 'success',
                   'Source run must finish successfully; early IPA artifacts remain available from Actions')
           jobs = api(f'repos/{repo}/actions/runs/{source}/jobs?per_page=100')['jobs']
-          for name in ['Core shortcut tests', 'iOS build and package']:
+          for name in ['Core shortcut tests', 'Native billing tests', 'iOS build and package']:
               matches = [job for job in jobs if job['name'] == name]
               require(len(matches) == 1 and matches[0]['conclusion'] == 'success',
                       f'Required job not successful: {name}')
@@ -66,7 +66,7 @@ jobs:
           with open(os.environ['GITHUB_ENV'], 'a') as out:
               out.write('SOURCE_SHA=' + run['head_sha'] + chr(10))
               out.write('SOURCE_NUMBER=' + str(run['run_number']) + chr(10))
-          print('Core tests and packaging passed. No polling, cancellation or recompilation.')
+          print('Flutter service/widget tests, native billing tests and packaging passed. No recompilation.')
           PY
       - name: Download compiled IPA
         run: |
@@ -85,7 +85,7 @@ jobs:
 
           下载 BeeCount-shortcut-unsigned.ipa；这是未签名安装包，需自行签名安装。SHA256SUMS.txt 用于校验文件。
 
-          核心快捷记账自动化测试与 iOS Release 编译并行执行，均已通过后发布本预发布版。复用原构建的 IPA，不重新编译。核心测试通过不等于真实 AI 识别和目标 iPhone 弹窗、后台执行已验收，真机测试仍待完成。
+          Flutter 核心/详情页测试、原生 RunnerTests 与 iOS Release 编译并行执行，三项均已通过后发布本预发布版。复用原构建的 IPA，不重新编译。核心测试通过不等于真实 AI 识别和目标 iPhone 弹窗、后台执行已验收，真机测试仍待完成。
 
           编译完成时即可从 Actions 附件先行下载；测试未完成或失败时，不代表完整验证通过。
 

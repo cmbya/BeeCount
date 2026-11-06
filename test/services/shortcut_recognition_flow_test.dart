@@ -176,7 +176,7 @@ void main() {
   test('bank aliases and card kind resolve only unique compatible accounts', () {
     final accounts = <Map<String, dynamic>>[
       {'id': 1, 'name': '招行信用卡', 'type': 'credit_card'},
-      {'id': 2, 'name': '招行储蓄卡', 'type': 'bank'},
+      {'id': 2, 'name': '招行储蓄卡', 'type': 'bank_card'},
       {'id': 3, 'name': '支付宝'},
       {'id': 4, 'name': '光大信用卡', 'type': 'credit_card'}
     ];
@@ -242,6 +242,16 @@ void main() {
     expect(result['candidates'][0]['occurredAt'], '2026-11-04T10:00:00.000Z');
     expect(result['candidates'][1]['occurredAt'], '2026-11-05T10:00:00.000Z');
     expect(await db.select(db.transactions).get(), isEmpty);
+  });
+
+  test('bank_card type is debit evidence even without storage name hint', () {
+    final debitOnly = <Map<String, dynamic>>[{'id': 1, 'name': '招行', 'type': 'bank_card'}];
+    expect(ShortcutService.matchAccount(debitOnly, clue: '招商银行信用卡', text: ''), isNull);
+    expect(ShortcutService.matchAccount(debitOnly, clue: '招商银行储蓄卡', text: ''), 1);
+    final both = [...debitOnly, {'id': 2, 'name': '招行账户', 'type': 'credit_card', 'bankName': '招商银行'}];
+    expect(ShortcutService.matchAccount(both, clue: '招商银行信用卡', text: ''), 2);
+    expect(ShortcutService.matchAccount(both, clue: '招商银行', text: ''), isNull);
+    expect(ShortcutService.matchAccount(debitOnly, clue: '招商银行信用卡(1234)', text: ''), isNull);
   });
 
 }

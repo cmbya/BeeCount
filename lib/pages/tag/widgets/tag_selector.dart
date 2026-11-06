@@ -28,12 +28,14 @@ class TagSelector extends ConsumerStatefulWidget {
     BuildContext context, {
     List<int> selectedTagIds = const [],
   }) async {
+    final editContainer = ProviderScope.containerOf(context, listen: false);
     return await showModalBottomSheet<List<int>>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => TagSelector(
-        selectedTagIds: selectedTagIds,
+      builder: (context) => UncontrolledProviderScope(
+        container: editContainer,
+        child: TagSelector(selectedTagIds: selectedTagIds),
       ),
     );
   }

@@ -10,6 +10,10 @@ on:
       - "pubspec.yaml"
       - "pubspec.lock"
       - "test/services/shortcut*"
+      - "test/services/transaction_detail*"
+      - "test/services/transaction_edit_scope*"
+      - "test/widgets/transaction_detail*"
+      - "test/widgets/transaction_edit_scope*"
       - ".github/workflows/shortcut-ios.yml"
   workflow_dispatch:
 
@@ -55,7 +59,14 @@ jobs:
           # Existing files cover draft recognition, local HTTP transport,
           # rules/settings, budget flags, atomic split commits and idempotency.
           # No production AI credentials, device, full-suite or coverage run.
-          flutter test --no-pub --reporter expanded test/services/shortcut*_test.dart 2>&1 | tee test-results/shortcut-tests.log
+          flutter test --no-pub --reporter expanded \
+            test/services/shortcut*_test.dart \
+            test/services/transaction_detail_service_test.dart \
+            test/services/transaction_edit_scope_test.dart \
+            test/widgets/transaction_detail_page_test.dart \
+            test/widgets/transaction_detail_images_test.dart \
+            test/widgets/transaction_edit_scope_test.dart \
+            2>&1 | tee test-results/shortcut-tests.log
       - name: Upload core test log
         if: always()
         uses: actions/upload-artifact@v4
@@ -70,7 +81,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           echo "### Core shortcut tests: $JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
-          echo "Focused Flutter tests only. No paid AI calls or iOS simulator. This does not verify physical-device menus." >> "$GITHUB_STEP_SUMMARY"
+          echo "Focused Flutter service/widget tests only. No paid AI calls in this job. Native simulator results are reported separately. This does not verify physical-device menus." >> "$GITHUB_STEP_SUMMARY"
 
   ios-build:
     name: iOS build and package
@@ -131,4 +142,56 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           echo "### iOS packaging: $JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
-          echo "If uploaded, the unsigned IPA is available in this run's artifacts. Check Core shortcut tests separately; pending or failed tests do not block artifact upload. Physical-device acceptance is still required." >> "$GITHUB_STEP_SUMMARY"
+          echo "If uploaded, the unsigned IPA is available in this run's artifacts. Check Core shortcut tests and Native billing tests separately; pending or failed tests do not block artifact upload. Physical-device acceptance is still required." >> "$GITHUB_STEP_SUMMARY"
+
+  native-tests:
+    name: Native billing tests
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Get dependencies
+        run: flutter pub get
+      - name: Configure native test dependencies
+        run: |
+          set -euo pipefail
+          flutter build ios --simulator --debug --no-pub --config-only
+          cd ios
+          pod install
+      - name: Select available iOS simulator
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, subprocess
+          devices = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '--json']))['devices']
+          candidates = [(runtime, d['udid']) for runtime, values in devices.items()
+                        if 'iOS' in runtime for d in values if d.get('isAvailable') and d['name'].startswith('iPhone')]
+          if not candidates:
+              raise RuntimeError('No available iPhone simulator; native tests cannot be skipped as passed')
+          runtime, udid = sorted(candidates, reverse=True)[0]
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write('TEST_SIMULATOR_ID=' + udid + '\n')
+          subprocess.run(['xcrun', 'simctl', 'boot', udid], check=False)
+          subprocess.run(['xcrun', 'simctl', 'bootstatus', udid, '-b'], check=True)
+          PY
+      - name: Run native billing tests
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          xcodebuild test -workspace ios/Runner.xcworkspace -scheme Runner \
+            -configuration Debug -destination "platform=iOS Simulator,id=$TEST_SIMULATOR_ID" \
+            -only-testing:RunnerTests -resultBundlePath test-results/RunnerTests.xcresult \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee test-results/native-tests.log
+      - name: Upload native test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shortcut-native-test-results
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 14

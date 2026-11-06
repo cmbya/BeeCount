@@ -462,7 +462,8 @@ class ShortcutService {
       final bank = normalize(a['bankName'] as String? ?? '');
       final accountBanks = banks('$name $bank');
       final tail = a['cardLastFour'] as String? ?? '';
-      final kind = a['type'] == 'credit_card' ? 'credit' : cardKind(name);
+      final kind = a['type'] == 'credit_card' ? 'credit' :
+          a['type'] == 'bank_card' ? 'debit' : cardKind(name);
       if (evidenceBanks.isNotEmpty && accountBanks.isEmpty && !tails.contains(tail)) return false;
       if (evidenceBanks.isNotEmpty && accountBanks.isNotEmpty && !evidenceBanks.any(accountBanks.contains)) return false;
       if (evidenceKind.isNotEmpty && kind.isNotEmpty && evidenceKind != kind) return false;

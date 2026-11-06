@@ -3610,5 +3610,7 @@
   "transactionDetailTitle": "账单详情",
   "transactionDetailCurrencyHint": "更改币种会清空已选账户，并重新折算账本金额；需要有效汇率。是否继续？",
   "transactionDetailSaveFailed": "保存失败，请检查所选资料、编辑权限及有效汇率。",
-  "transactionDetailImages": "图片"
+  "transactionDetailImages": "图片",
+  "transactionDetailImagesFailed": "图片未保存成功，请检查存储空间和图片后重试。",
+  "transactionDetailImagesPartial": "部分图片未保存成功，请核对已保存图片后补充缺失项。"
 }

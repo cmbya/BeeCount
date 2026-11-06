@@ -3293,5 +3293,7 @@
   "transactionDetailTitle": "帳單詳情",
   "transactionDetailCurrencyHint": "更改幣別會清空已選帳戶，並重新換算帳本金額；需要有效匯率。是否繼續？",
   "transactionDetailSaveFailed": "儲存失敗，請檢查所選資料、編輯權限及有效匯率。",
-  "transactionDetailImages": "圖片"
+  "transactionDetailImages": "圖片",
+  "transactionDetailImagesFailed": "圖片未儲存成功，請檢查儲存空間與圖片後重試。",
+  "transactionDetailImagesPartial": "部分圖片未儲存成功，請核對已儲存圖片後補上缺少的項目。"
 }
