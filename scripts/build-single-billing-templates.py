@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round-one unsigned single-bill templates. No tests, signing or App builds.
+"""Unsigned single-bill + progressive split system-input templates. No tests, signing or App builds.
 The plist schema is unofficial; importing and property bindings need device checks.
 Run only in the authorized build environment/workstation, never install tools.
 """
@@ -43,8 +43,8 @@ def build(mode, bundle="com.tntlikely.beecount", team="0000000000"):
     def resume(label, key, source):
         return [native("ContinueSingleBillingIntent", label, step=variable("单笔步骤"), hasResponse=True, **{key: token(output(source))}), setstep(label)]
     actions = [action("is.workflow.actions.comment", "about", WFCommentActionText=
-        "第一轮完整单笔（需要 Build 20 或更新版）。最后点确认提交会真实入账，先用小额测试。"
-        "系统请求输入带当前值；取消或中断不保存。没有拆分。模板未签名且尚未导入验证，"
+        "完整单笔及逐笔拆分（需安装对应新代码的 App；Build 19 不支持）。确认保存会真实入账，先用小额测试。"
+        "系统请求输入带当前值；拆分每确认一笔立即入账，中止只放弃当前未保存笔，已保存笔保留。模板未签名且尚未导入验证，"
         "若签名更换 Bundle ID，须用实际值重新生成。附图请在保存动作手动连接原图，默认不保存附件。")]
     start = {"source": mode}
     if mode == "image":
@@ -56,9 +56,15 @@ def build(mode, bundle="com.tntlikely.beecount", team="0000000000"):
     actions += [native("StartSingleBillingIntent", "start", **start), setstep("start"),
                 native("ContinueSingleBillingIntent", "first", step=variable("单笔步骤"), hasResponse=False), setstep("first")]
     group = uid("loop-group")
-    actions.append(action("is.workflow.actions.repeat.count", "loop", GroupingIdentifier=group, WFControlFlowMode=0, WFRepeatCount=100))
+    actions.append(action("is.workflow.actions.repeat.count", "loop", GroupingIdentifier=group, WFControlFlowMode=0, WFRepeatCount=1000))
     actions.append(condition("confirmed", "单笔步骤", "步骤状态", "status", "confirmed"))
     actions += [native("SaveSingleBillingIntent", "save", step=variable("单笔步骤")), stop("saved"), end("confirmed")]
+    actions.append(condition("split-confirmed", "单笔步骤", "步骤状态", "status", "split-confirmed"))
+    actions += [native("SaveProgressiveSplitIntent", "save-part", step=variable("单笔步骤")), setstep("save-part"), end("split-confirmed")]
+    actions.append(condition("split-ended", "单笔步骤", "步骤状态", "status", "split-ended"))
+    actions += [action("is.workflow.actions.showresult", "split-result", Text=text(prop("单笔步骤", "结果说明", "resultMessage"))), stop("split-done"), end("split-ended")]
+    actions.append(condition("cancelled", "单笔步骤", "步骤状态", "status", "cancelled"))
+    actions += [stop("cancelled-stop"), end("cancelled")]
     actions.append(condition("input", "单笔步骤", "步骤状态", "status", "input"))
     actions.append(condition("number", "单笔步骤", "输入类型", "inputType", "number"))
     actions.append(action("is.workflow.actions.ask", "ask-number", WFAskActionPrompt=text(prop("单笔步骤", "输入提示", "prompt")), WFInputType="Number",
@@ -73,9 +79,11 @@ def build(mode, bundle="com.tntlikely.beecount", team="0000000000"):
     actions.append(action("is.workflow.actions.ask", "ask-text", WFAskActionPrompt=text(prop("单笔步骤", "输入提示", "prompt")), WFInputType="Text",
                           WFAskActionDefaultAnswer=text(prop("单笔步骤", "当前内容", "currentText")), WFAskActionAllowsMultiline=True))
     actions += resume("resume-text", "text", "ask-text")
-    actions += [end("date"), end("number"), otherwise("input"), stop("cancelled-or-unknown"), end("input")]
+    actions += [end("date"), end("number"), otherwise("input"),
+                native("ContinueSingleBillingIntent", "next-part-or-retry", step=variable("单笔步骤"), hasResponse=False),
+                setstep("next-part-or-retry"), end("input")]
     actions += [action("is.workflow.actions.repeat.count", "loop-end", GroupingIdentifier=group, WFControlFlowMode=2),
-                action("is.workflow.actions.alert", "limit", WFAlertActionTitle="未入账", WFAlertActionMessage="已达编辑次数上限，未自动保存。请重新运行。"), stop("limit-stop")]
+                action("is.workflow.actions.alert", "limit", WFAlertActionTitle="已停止", WFAlertActionMessage="已达编辑次数上限，当前未确认内容及剩余金额不自动入账；拆分中已保存的笔保留。若有结果未知请先查询原请求，不要重新记入原总额。"), stop("limit-stop")]
     return {"WFWorkflowClientVersion": "3607.0.5", "WFWorkflowMinimumClientVersion": 900, "WFWorkflowMinimumClientVersionString": "900",
             "WFWorkflowName": "蜜蜂单笔-" + MODES[mode], "WFWorkflowIcon": {"WFWorkflowIconStartColor": 4282601983, "WFWorkflowIconGlyphNumber": 61440},
             "WFWorkflowTypes": [], "WFWorkflowInputContentItemClasses": [], "WFWorkflowOutputContentItemClasses": [],

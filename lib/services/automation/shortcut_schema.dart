@@ -137,6 +137,27 @@ class ShortcutAttachment {
   Map<String, dynamic> get identity => {'sha256': digest, 'extension': extension};
 }
 
+/// Only successful parts are persisted by ShortcutStore. No draft content lives
+/// in this metadata. Each part has one regular request ID and one ordered slot.
+class ShortcutProgressiveSplit {
+  final String sessionId;
+  final int partIndex;
+  final int totalMinor;
+  const ShortcutProgressiveSplit({required this.sessionId,
+    required this.partIndex, required this.totalMinor});
+  factory ShortcutProgressiveSplit.fromJson(dynamic raw) {
+    if (raw is! Map<String, dynamic> || raw['sessionId'] is! String ||
+        !RegExp(r'^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$').hasMatch(raw['sessionId'] as String) ||
+        raw['partIndex'] is! int || (raw['partIndex'] as int) < 1 || (raw['partIndex'] as int) > 100) {
+      throw const ShortcutFailure('INVALID_SPLIT', '逐笔拆分会话或序号无效');
+    }
+    return ShortcutProgressiveSplit(sessionId: (raw['sessionId'] as String).toLowerCase(),
+        partIndex: raw['partIndex'] as int, totalMinor: shortcutInt(raw['totalMinor'], '拆分总额'));
+  }
+  Map<String, dynamic> toJson() => {'sessionId': sessionId,
+    'partIndex': partIndex, 'totalMinor': totalMinor};
+}
+
 class ShortcutSubmission {
   final String type;
   final int? toAccountId;
@@ -148,9 +169,11 @@ class ShortcutSubmission {
   final int originalAmountMinor;
   final List<ShortcutEntry> entries;
   final ShortcutAttachment? attachment;
+  final ShortcutProgressiveSplit? split;
   const ShortcutSubmission(
       {required this.requestId,
       this.attachment,
+       this.split,
       this.type = 'expense',
       this.toAccountId,
       required this.currency,
@@ -200,6 +223,11 @@ class ShortcutSubmission {
       throw const ShortcutFailure(
           'INVALID_REFERENCE', '转出和转入账户必须不同，非转账不能指定转入账户');
     }
+    final split = json['split'] == null ? null : ShortcutProgressiveSplit.fromJson(json['split']);
+    if (split != null && (json['type'] != 'expense' || entries.length != 1 ||
+        split.sessionId == id.toLowerCase() || entries.single.amountMinor > split.totalMinor)) {
+      throw const ShortcutFailure('INVALID_SPLIT', '逐笔拆分只允许一条支出且不得超过原总额');
+    }
     final original = shortcutInt(json['originalAmountMinor'], '原付款');
     if (entries.fold<int>(0, (s, e) => s + e.amountMinor) != original) {
       throw const ShortcutFailure('INVALID_AMOUNT', '明细合计必须等于原付款');
@@ -214,6 +242,7 @@ class ShortcutSubmission {
         occurredAt: date.toUtc(),
         originalAmountMinor: original,
         entries: entries,
+        split: split,
         attachment: json['attachment'] == null ? null : ShortcutAttachment.fromJson(json['attachment']));
   }
 
@@ -229,6 +258,7 @@ class ShortcutSubmission {
         'occurredAt': occurredAt.toIso8601String(),
         'originalAmountMinor': originalAmountMinor,
         'entries': entries.map((e) => e.toJson()).toList(),
+         if (split != null) 'split': split!.toJson(),
         if (attachment != null) 'attachment': attachment!.identity
       });
 }

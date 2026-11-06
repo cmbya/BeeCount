@@ -12,3 +12,12 @@ const shortcutTablesSql = [
       'ledger_id INTEGER, field TEXT NOT NULL, match_mode TEXT NOT NULL, '
       'keyword TEXT NOT NULL, category_id INTEGER NOT NULL, priority INTEGER NOT NULL)',
 ];
+
+/// Progress of confirmed/committed parts only. Never contains editable notes.
+const shortcutProgressiveTablesSql = [
+  'CREATE TABLE IF NOT EXISTS shortcut_split_sessions ('
+      'session_id TEXT PRIMARY KEY, ledger_id INTEGER NOT NULL, '
+      'account_id INTEGER NOT NULL, currency TEXT NOT NULL, '
+      'total_minor INTEGER NOT NULL, paid_minor INTEGER NOT NULL, '
+      'saved_count INTEGER NOT NULL)',
+];

@@ -1510,7 +1510,7 @@ class RunnerTests: XCTestCase {
 
   @available(iOS 16.0, *)
   @MainActor
-  func testSingleBillSystemInputPreservesAllFieldsAndHasNoSplit() async throws {
+  func testSingleBillSystemInputPreservesAllFieldsAndHasNoLegacyBatchSplit() async throws {
     var source = try ConfirmedBilling.decode(editorDraft())
     var candidate = try XCTUnwrap((source["candidates"] as? [[String: Any]])?.first)
     candidate["tagIds"] = [3, 4]
@@ -1689,6 +1689,198 @@ class RunnerTests: XCTestCase {
     let intent = StartSingleBillingIntent()
     XCTAssertNil(intent.merchant)
     XCTAssertNil(intent.ruleText)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  private func splitContextForTest(paid: Int = 0, count: Int = 0) -> [String: Any] {
+    ["version": 1, "sessionId": "12345678-1111-4222-8333-123456789abc",
+     "totalMinor": 30000, "paidMinor": paid, "savedCount": count, "minorDigits": 2,
+     "ledgerId": 1, "accountId": 1, "currency": "CNY", "useAllRemaining": false,
+     "template": ["note": "原文", "tagIds": [3, 4], "excludeFromBudget": true,
+       "categoryId": 10, "occurredAt": "2026-11-06T12:30:00+08:00"]]
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  private func confirmedSplitForTest(_ ctx: [String: Any], amount: Int) throws -> SingleBillingStep {
+    let index = (ctx["savedCount"] as! Int) + 1
+    let bill: [String: Any] = ["schemaVersion": 1, "confirmed": true, "type": "expense",
+      "requestId": ProgressiveSplitFlow.partID(ctx["sessionId"] as! String, index: index),
+      "ledgerId": ctx["ledgerId"]!, "accountId": ctx["accountId"]!, "currency": ctx["currency"]!,
+      "occurredAt": "2026-11-06T12:30:00+08:00", "originalAmountMinor": amount,
+      "entries": [["amountMinor": amount, "note": "第\(index)笔", "tagIds": [3, 4], "excludeFromBudget": true, "categoryId": 10]],
+      "split": ["sessionId": ctx["sessionId"]!, "partIndex": index, "totalMinor": ctx["totalMinor"]!]]
+    return try ProgressiveSplitFlow.envelope("split-confirmed", context: ctx, submission: ConfirmedBilling.encode(bill))
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  private func splitReceiptForTest(_ bill: [String: Any], paid: Int, count: Int) -> [String: Any] {
+    let split = bill["split"] as! [String: Any]
+    return ["status": "committed", "requestId": bill["requestId"]!, "count": 1, "type": "expense",
+      "totalAmountMinor": bill["originalAmountMinor"]!, "currency": bill["currency"]!,
+      "split": split.merging(["paidMinor": paid, "savedCount": count,
+                              "remainingMinor": (split["totalMinor"] as! Int) - paid]) { _, new in new }]
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testProgressiveSplitEditsCurrentPartAndRejectsAmountAboveRemaining() async throws {
+    let initial = try ProgressiveSplitFlow.part(splitContextForTest(paid: 8000, count: 1), useAll: false)
+    var actions = ["金额", "返回修改", "金额", "备注", "确认保存此笔"]
+    let choose: ([String], String) async throws -> String = { values, prompt in
+      if values.contains("确认保存此笔") {
+        XCTAssertFalse(values.contains { $0.hasPrefix("账本：") || $0.hasPrefix("账户：") || $0.hasPrefix("收支类型：") })
+        XCTAssertTrue(prompt.contains("剩余未记 220.00"))
+      }
+      let selected = self.menuValue(actions.removeFirst(), values)
+      XCTAssertTrue(values.contains(selected), selected)
+      return selected
+    }
+    let call: ([String: Any]) async throws -> [String: Any] = { request in
+      XCTAssertTrue(["options", "validate"].contains(request["operation"] as? String ?? ""))
+      return request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions()
+    }
+    var step = try await SingleBillingFlow.advance(initial, hasResponse: false, text: nil, number: nil, date: nil, choose: choose, call: call)
+    XCTAssertEqual(step.currentNumber, 220)
+    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: nil, number: 230, date: nil, choose: choose, call: call)
+    XCTAssertEqual(step.currentNumber, 220, "Oversize must preserve old amount")
+    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: nil, number: 150, date: nil, choose: choose, call: call)
+    XCTAssertEqual(step.currentText, "原文")
+    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: "修改后", number: nil, date: nil, choose: choose, call: call)
+    XCTAssertEqual(step.status, "split-confirmed")
+    let outer = try ConfirmedBilling.decode(step.state)
+    let ctx = try XCTUnwrap(outer["splitContext"] as? [String: Any])
+    let bill = try ProgressiveSplitFlow.checkedSubmission(outer, context: ctx)
+    XCTAssertEqual(bill["originalAmountMinor"] as? Int, 15000)
+    let entry = try XCTUnwrap((bill["entries"] as? [[String: Any]])?.first)
+    XCTAssertEqual(entry["note"] as? String, "修改后")
+    XCTAssertEqual(entry["tagIds"] as? [Int], [3, 4])
+    XCTAssertEqual(entry["excludeFromBudget"] as? Bool, true)
+    XCTAssertTrue(actions.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testProgressiveSaveReconcilesLostReplyAndRetryUsesSamePayload() async throws {
+    let ctx = splitContextForTest()
+    let step = try confirmedSplitForTest(ctx, amount: 8000)
+    var stored: [String: Any]?
+    var commits = 0
+    let call: ([String: Any]) async throws -> [String: Any] = { request in
+      let bill = try XCTUnwrap(request["submission"] as? [String: Any])
+      XCTAssertEqual(bill["requestId"] as? String, ProgressiveSplitFlow.partID(ctx["sessionId"] as! String, index: 1))
+      if request["operation"] as? String == "query_split" {
+        return stored ?? ["status": "not_found"]
+      }
+      XCTAssertEqual(request["operation"] as? String, "commit")
+      commits += 1
+      stored = self.splitReceiptForTest(bill, paid: 8000, count: 1)
+      throw NSError(domain: "test-lost-reply", code: 1014)
+    }
+    let next = try await ProgressiveSplitFlow.save(step, attachment: nil, call: call)
+    XCTAssertEqual(next.status, "split-next")
+    XCTAssertTrue(next.resultMessage.contains("剩余未记 220.00"))
+    let again = try await ProgressiveSplitFlow.save(step, attachment: nil, call: call)
+    XCTAssertEqual(again.status, "split-next")
+    XCTAssertEqual(commits, 1)
+    let progress = try XCTUnwrap((try ConfirmedBilling.decode(next.state))["splitContext"] as? [String: Any])
+    XCTAssertEqual(progress["paidMinor"] as? Int, 8000)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testProgressiveSaveFailureKeepsProgressAndCannotSilentlyStartNextPart() async throws {
+    let ctx = splitContextForTest(paid: 8000, count: 1)
+    let step = try confirmedSplitForTest(ctx, amount: 15000)
+    let failed = try await ProgressiveSplitFlow.save(step, attachment: nil, call: { request in
+      if request["operation"] as? String == "query_split" { return ["status": "not_found"] }
+      throw NSError(domain: "test-write", code: 1)
+    })
+    XCTAssertEqual(failed.status, "split-retry")
+    let raw = try ConfirmedBilling.decode(failed.state)
+    let kept = try XCTUnwrap(raw["splitContext"] as? [String: Any])
+    XCTAssertEqual(kept["paidMinor"] as? Int, 8000)
+    XCTAssertEqual(kept["savedCount"] as? Int, 1)
+    let retry = try await SingleBillingFlow.advance(failed, hasResponse: false, text: nil, number: nil, date: nil, choose: { values, _ in
+      XCTAssertEqual(values, ["重试保存当前笔", "结束并稍后查询"])
+      return "重试保存当前笔"
+    })
+    XCTAssertEqual(retry.status, "split-confirmed")
+    XCTAssertEqual(try ConfirmedBilling.decode(retry.state)["submission"] as? String, raw["submission"] as? String)
+    let stopped = try await ProgressiveSplitFlow.next(failed, choose: { _, _ in "结束并稍后查询" })
+    XCTAssertEqual(stopped.status, "split-ended")
+    XCTAssertTrue(stopped.resultMessage.contains("可能已经保存"))
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testProgressivePartialEndKeepsSavedBillsAndFinalRemainderNeedsConfirmation() async throws {
+    let ctx = splitContextForTest(paid: 23000, count: 2)
+    let after = try ProgressiveSplitFlow.envelope("split-next", context: ctx)
+    let stopped = try await ProgressiveSplitFlow.next(after, choose: { _, _ in "结束拆分" })
+    XCTAssertEqual(stopped.status, "split-ended")
+    XCTAssertTrue(stopped.resultMessage.contains("剩余未记 70.00"))
+    XCTAssertTrue(stopped.resultMessage.contains("已保存账单保留"))
+    let last = try await ProgressiveSplitFlow.next(after, choose: { _, _ in "剩余作为最后一笔编辑" })
+    XCTAssertEqual(last.status, "editing", "No automatic remainder commit")
+    let outer = try ConfirmedBilling.decode(last.state)
+    let lastCtx = try XCTUnwrap(outer["splitContext"] as? [String: Any])
+    XCTAssertEqual(lastCtx["useAllRemaining"] as? Bool, true)
+    let confirmed = try confirmedSplitForTest(lastCtx, amount: 7000)
+    let final = try await ProgressiveSplitFlow.save(confirmed, attachment: nil, call: { request in
+      if request["operation"] as? String == "query_split" { return ["status": "not_found"] }
+      return self.splitReceiptForTest(try XCTUnwrap(request["submission"] as? [String: Any]), paid: 30000, count: 3)
+    })
+    XCTAssertEqual(final.status, "split-ended")
+    XCTAssertTrue(final.resultMessage.contains("全部拆分已在本机入账"))
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testProgressiveIDsAndNormalSaveGuardAgainstDuplicateWholeBill() async throws {
+    let session = splitContextForTest()["sessionId"] as! String
+    let first = ProgressiveSplitFlow.partID(session, index: 1)
+    XCTAssertNotNil(UUID(uuidString: first))
+    XCTAssertEqual(first, ProgressiveSplitFlow.partID(session.uppercased(), index: 1))
+    XCTAssertNotEqual(first, ProgressiveSplitFlow.partID(session, index: 2))
+    let split = try confirmedSplitForTest(splitContextForTest(), amount: 8000)
+    var calls = 0
+    do {
+      _ = try await SingleBillingFlow.save(split, attachment: nil, commit: { _, _ in calls += 1; return "bad" })
+      XCTFail("Split confirmation must use its dedicated per-part save")
+    } catch {}
+    XCTAssertEqual(calls, 0)
+    XCTAssertTrue(SaveProgressiveSplitIntent.isDiscoverable)
+    XCTAssertFalse(SaveProgressiveSplitIntent.openAppWhenRun)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testSingleMenuEntersProgressiveSplitWithoutCommittingOriginal() async throws {
+    let start = try SingleBillingStep(BillingStepFlow.start(editorDraft(), showIncompleteDraft: true, singleOnly: true))
+    var actions = ["备注", "拆分并逐笔保存", "金额"]
+    let choose: ([String], String) async throws -> String = { values, _ in
+      let selected = self.menuValue(actions.removeFirst(), values)
+      XCTAssertTrue(values.contains(selected), selected)
+      return selected
+    }
+    let call: ([String: Any]) async throws -> [String: Any] = { request in
+      XCTAssertEqual(request["operation"] as? String, "options", "Beginning a split must not validate/commit original bill or rerun AI")
+      return self.editorOptions()
+    }
+    let note = try await SingleBillingFlow.advance(start, hasResponse: false, text: nil, number: nil, date: nil, choose: choose, call: call)
+    let part = try await SingleBillingFlow.advance(note, hasResponse: true, text: "拆分前已改备注", number: nil, date: nil, choose: choose, call: call)
+    XCTAssertEqual(part.status, "input")
+    XCTAssertEqual(part.inputType, "number")
+    XCTAssertEqual(part.currentNumber, 300)
+    let outer = try ConfirmedBilling.decode(part.state)
+    let ctx = try XCTUnwrap(outer["splitContext"] as? [String: Any])
+    XCTAssertEqual(ctx["savedCount"] as? Int, 0)
+    XCTAssertEqual(ctx["paidMinor"] as? Int, 0)
+    XCTAssertEqual((ctx["template"] as? [String: Any])?["note"] as? String, "拆分前已改备注")
+    XCTAssertTrue(actions.isEmpty)
   }
 
 }

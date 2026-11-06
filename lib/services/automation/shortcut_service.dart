@@ -34,6 +34,9 @@ class ShortcutService {
           return await recognize(input);
         case 'classify':
           return await classify(input);
+        case 'query_split':
+          return await store.querySplit(ShortcutSubmission.fromJson(
+              input['submission'] as Map<String, dynamic>));
         case 'query':
           return await store.query(input['requestId'] as String);
         case 'recent':

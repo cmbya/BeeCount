@@ -43,6 +43,23 @@ class ShortcutStore {
     };
   }
 
+  /// Reconcile a possibly completed split call without treating a different
+  /// payload sharing the request ID as a successful retry.
+  Future<Map<String, dynamic>> querySplit(ShortcutSubmission request) async {
+    if (request.split == null) {
+      throw const ShortcutFailure('INVALID_SPLIT', '查询逐笔结果需要拆分请求');
+    }
+    final row = await db.customSelect(
+        'SELECT digest, result_json FROM shortcut_receipts WHERE request_id = ?',
+        variables: [d.Variable.withString(request.requestId)]).getSingleOrNull();
+    if (row == null) return {'status': 'not_found', 'requestId': request.requestId};
+    final digest = sha256.convert(utf8.encode(request.canonical)).toString();
+    if (row.read<String>('digest') != digest) {
+      throw const ShortcutFailure('REQUEST_CONFLICT', '同一拆分序号已有不同内容，请查询原结果；不要再次保存');
+    }
+    return {...jsonDecode(row.read<String>('result_json')) as Map<String, dynamic>, 'replayed': true};
+  }
+
   Future<Map<String, dynamic>> commit(ShortcutSubmission request,
       {bool validateOnly = false}) async {
     final digest = sha256.convert(utf8.encode(request.canonical)).toString();
@@ -64,6 +81,44 @@ class ShortcutStore {
                 as Map<String, dynamic>,
             'replayed': true
           };
+        }
+        final split = request.split;
+        var paidMinor = 0;
+        var savedCount = 0;
+        var existingSession = false;
+        if (split == null) {
+          // A stale pre-split whole-bill confirmation must never double-book it.
+          final started = await db.customSelect(
+              'SELECT session_id FROM shortcut_split_sessions WHERE session_id = ?',
+              variables: [d.Variable.withString(request.requestId)]).getSingleOrNull();
+          if (started != null) {
+            throw const ShortcutFailure('SPLIT_STARTED', '此原账单已经逐笔记入，不能再整笔保存');
+          }
+        } else {
+          final wholeReceipt = await db.customSelect(
+              'SELECT request_id FROM shortcut_receipts WHERE request_id = ?',
+              variables: [d.Variable.withString(split.sessionId)]).getSingleOrNull();
+          if (wholeReceipt != null) {
+            throw const ShortcutFailure('SPLIT_CONFLICT', '原账单已整笔保存，不能再次拆分入账');
+          }
+          final session = await db.customSelect(
+              'SELECT * FROM shortcut_split_sessions WHERE session_id = ?',
+              variables: [d.Variable.withString(split.sessionId)]).getSingleOrNull();
+          if (session != null) {
+            existingSession = true;
+            if (session.read<int>('ledger_id') != request.ledgerId ||
+                session.read<int>('account_id') != request.accountId ||
+                session.read<String>('currency') != request.currency ||
+                session.read<int>('total_minor') != split.totalMinor) {
+              throw const ShortcutFailure('SPLIT_CONFLICT', '已保存拆分的账本、账户、币种及原总额不能改变');
+            }
+            paidMinor = session.read<int>('paid_minor');
+            savedCount = session.read<int>('saved_count');
+          }
+          if (split.partIndex != savedCount + 1 ||
+              request.originalAmountMinor > split.totalMinor - paidMinor) {
+            throw const ShortcutFailure('SPLIT_STALE', '此拆分步骤已过期、已保存或超出剩余金额，请查询原请求，不要重新记账');
+          }
         }
         final ledger = await repo.getLedgerById(request.ledgerId);
         final account = await repo.getAccount(request.accountId);
@@ -157,6 +212,23 @@ class ShortcutStore {
           ledger.currency,
           jsonEncode(ids.map((id) => syncById[id]).toList()),
         ]);
+        // Same transaction as the bill, attachments and receipt. Validation
+        // never creates this row; a rollback cannot consume the remaining money.
+        if (split != null) {
+          paidMinor += request.originalAmountMinor;
+          savedCount += 1;
+          if (existingSession) {
+            await db.customStatement(
+                'UPDATE shortcut_split_sessions SET paid_minor = ?, saved_count = ? WHERE session_id = ?',
+                [paidMinor, savedCount, split.sessionId]);
+          } else {
+            await db.customStatement('INSERT INTO shortcut_split_sessions '
+                '(session_id, ledger_id, account_id, currency, total_minor, paid_minor, saved_count) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                [split.sessionId, request.ledgerId, request.accountId, request.currency,
+                  split.totalMinor, paidMinor, savedCount]);
+          }
+        }
         final result = <String, dynamic>{
           'requestId': request.requestId,
           'status': 'committed',
@@ -169,6 +241,10 @@ class ShortcutStore {
           'replayed': false,
           'attachmentCount': attachment == null ? 0 : ids.length,
           'syncStatus': 'pending',
+          if (split != null) 'split': {
+            ...split.toJson(), 'paidMinor': paidMinor,
+            'remainingMinor': split.totalMinor - paidMinor, 'savedCount': savedCount,
+          },
           'warnings': ['已在本机入账；云端状态请查看 App 同步状态，无需再次记账']
         };
         await db.customStatement(

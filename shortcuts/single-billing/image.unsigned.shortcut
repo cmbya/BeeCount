@@ -35,7 +35,7 @@
 				<key>UUID</key>
 				<string>CACFCCB3-2610-546F-9B09-AD090E924CEB</string>
 				<key>WFCommentActionText</key>
-				<string>第一轮完整单笔（需要 Build 20 或更新版）。最后点确认提交会真实入账，先用小额测试。系统请求输入带当前值；取消或中断不保存。没有拆分。模板未签名且尚未导入验证，若签名更换 Bundle ID，须用实际值重新生成。附图请在保存动作手动连接原图，默认不保存附件。</string>
+				<string>完整单笔及逐笔拆分（需安装对应新代码的 App；Build 19 不支持）。确认保存会真实入账，先用小额测试。系统请求输入带当前值；拆分每确认一笔立即入账，中止只放弃当前未保存笔，已保存笔保留。模板未签名且尚未导入验证，若签名更换 Bundle ID，须用实际值重新生成。附图请在保存动作手动连接原图，默认不保存附件。</string>
 			</dict>
 		</dict>
 		<dict>
@@ -185,7 +185,7 @@
 				<key>WFControlFlowMode</key>
 				<integer>0</integer>
 				<key>WFRepeatCount</key>
-				<integer>100</integer>
+				<integer>1000</integer>
 			</dict>
 		</dict>
 		<dict>
@@ -285,6 +285,297 @@
 				<string>2918101B-3005-5740-89A9-B9A8A99C32D0</string>
 				<key>GroupingIdentifier</key>
 				<string>8FF59C95-07DE-5D88-9691-E78951E74B71</string>
+				<key>WFControlFlowMode</key>
+				<integer>2</integer>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFWorkflowActionIdentifier</key>
+			<string>is.workflow.actions.conditional</string>
+			<key>WFWorkflowActionParameters</key>
+			<dict>
+				<key>UUID</key>
+				<string>69169B30-B1F3-5847-A4B7-C3BAC79FB97E</string>
+				<key>GroupingIdentifier</key>
+				<string>7A40302D-695E-5E2F-A811-F194A0E574C3</string>
+				<key>WFControlFlowMode</key>
+				<integer>0</integer>
+				<key>WFInput</key>
+				<dict>
+					<key>Type</key>
+					<string>Variable</string>
+					<key>Variable</key>
+					<dict>
+						<key>Value</key>
+						<dict>
+							<key>Type</key>
+							<string>Variable</string>
+							<key>VariableName</key>
+							<string>单笔步骤</string>
+							<key>Aggrandizements</key>
+							<array>
+								<dict>
+									<key>Type</key>
+									<string>WFPropertyVariableAggrandizement</string>
+									<key>PropertyName</key>
+									<string>步骤状态</string>
+									<key>PropertyUserInfo</key>
+									<string>status</string>
+								</dict>
+							</array>
+						</dict>
+						<key>WFSerializationType</key>
+						<string>WFTextTokenAttachment</string>
+					</dict>
+				</dict>
+				<key>WFCondition</key>
+				<integer>4</integer>
+				<key>WFConditionalActionString</key>
+				<string>split-confirmed</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFWorkflowActionIdentifier</key>
+			<string>com.tntlikely.beecount.SaveProgressiveSplitIntent</string>
+			<key>WFWorkflowActionParameters</key>
+			<dict>
+				<key>UUID</key>
+				<string>0E48B742-E1BA-58B8-858B-2EC9ACB41C06</string>
+				<key>AppIntentDescriptor</key>
+				<dict>
+					<key>AppIntentIdentifier</key>
+					<string>SaveProgressiveSplitIntent</string>
+					<key>BundleIdentifier</key>
+					<string>com.tntlikely.beecount</string>
+					<key>Name</key>
+					<string>蜜蜂记账</string>
+					<key>TeamIdentifier</key>
+					<string>0000000000</string>
+					<key>ActionRequiresAppInstallation</key>
+					<true/>
+				</dict>
+				<key>step</key>
+				<dict>
+					<key>Value</key>
+					<dict>
+						<key>Type</key>
+						<string>Variable</string>
+						<key>VariableName</key>
+						<string>单笔步骤</string>
+					</dict>
+					<key>WFSerializationType</key>
+					<string>WFTextTokenAttachment</string>
+				</dict>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFWorkflowActionIdentifier</key>
+			<string>is.workflow.actions.setvariable</string>
+			<key>WFWorkflowActionParameters</key>
+			<dict>
+				<key>UUID</key>
+				<string>6F64785A-072C-5BEA-AA2E-BCD5D68A3686</string>
+				<key>WFVariableName</key>
+				<string>单笔步骤</string>
+				<key>WFInput</key>
+				<dict>
+					<key>Value</key>
+					<dict>
+						<key>Type</key>
+						<string>ActionOutput</string>
+						<key>OutputUUID</key>
+						<string>0E48B742-E1BA-58B8-858B-2EC9ACB41C06</string>
+						<key>OutputName</key>
+						<string>save-part</string>
+					</dict>
+					<key>WFSerializationType</key>
+					<string>WFTextTokenAttachment</string>
+				</dict>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFWorkflowActionIdentifier</key>
+			<string>is.workflow.actions.conditional</string>
+			<key>WFWorkflowActionParameters</key>
+			<dict>
+				<key>UUID</key>
+				<string>81105979-12DA-55B2-A8AE-FC4080B837B0</string>
+				<key>GroupingIdentifier</key>
+				<string>7A40302D-695E-5E2F-A811-F194A0E574C3</string>
+				<key>WFControlFlowMode</key>
+				<integer>2</integer>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFWorkflowActionIdentifier</key>
+			<string>is.workflow.actions.conditional</string>
+			<key>WFWorkflowActionParameters</key>
+			<dict>
+				<key>UUID</key>
+				<string>56857191-A199-54EB-A1E8-6AEA59B6552E</string>
+				<key>GroupingIdentifier</key>
+				<string>30982599-8A1E-59A1-A0A1-90C713DD05DB</string>
+				<key>WFControlFlowMode</key>
+				<integer>0</integer>
+				<key>WFInput</key>
+				<dict>
+					<key>Type</key>
+					<string>Variable</string>
+					<key>Variable</key>
+					<dict>
+						<key>Value</key>
+						<dict>
+							<key>Type</key>
+							<string>Variable</string>
+							<key>VariableName</key>
+							<string>单笔步骤</string>
+							<key>Aggrandizements</key>
+							<array>
+								<dict>
+									<key>Type</key>
+									<string>WFPropertyVariableAggrandizement</string>
+									<key>PropertyName</key>
+									<string>步骤状态</string>
+									<key>PropertyUserInfo</key>
+									<string>status</string>
+								</dict>
+							</array>
+						</dict>
+						<key>WFSerializationType</key>
+						<string>WFTextTokenAttachment</string>
+					</dict>
+				</dict>
+				<key>WFCondition</key>
+				<integer>4</integer>
+				<key>WFConditionalActionString</key>
+				<string>split-ended</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFWorkflowActionIdentifier</key>
+			<string>is.workflow.actions.showresult</string>
+			<key>WFWorkflowActionParameters</key>
+			<dict>
+				<key>UUID</key>
+				<string>C8E7CD13-57F2-53A8-9474-17EB132353F8</string>
+				<key>Text</key>
+				<dict>
+					<key>Value</key>
+					<dict>
+						<key>string</key>
+						<string>￼</string>
+						<key>attachmentsByRange</key>
+						<dict>
+							<key>{0, 1}</key>
+							<dict>
+								<key>Type</key>
+								<string>Variable</string>
+								<key>VariableName</key>
+								<string>单笔步骤</string>
+								<key>Aggrandizements</key>
+								<array>
+									<dict>
+										<key>Type</key>
+										<string>WFPropertyVariableAggrandizement</string>
+										<key>PropertyName</key>
+										<string>结果说明</string>
+										<key>PropertyUserInfo</key>
+										<string>resultMessage</string>
+									</dict>
+								</array>
+							</dict>
+						</dict>
+					</dict>
+					<key>WFSerializationType</key>
+					<string>WFTextTokenString</string>
+				</dict>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFWorkflowActionIdentifier</key>
+			<string>is.workflow.actions.exit</string>
+			<key>WFWorkflowActionParameters</key>
+			<dict>
+				<key>UUID</key>
+				<string>631ABF30-9CF1-5B01-AB19-C20852D9855B</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFWorkflowActionIdentifier</key>
+			<string>is.workflow.actions.conditional</string>
+			<key>WFWorkflowActionParameters</key>
+			<dict>
+				<key>UUID</key>
+				<string>8A07D674-66F0-5978-9A11-1ABE26537D51</string>
+				<key>GroupingIdentifier</key>
+				<string>30982599-8A1E-59A1-A0A1-90C713DD05DB</string>
+				<key>WFControlFlowMode</key>
+				<integer>2</integer>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFWorkflowActionIdentifier</key>
+			<string>is.workflow.actions.conditional</string>
+			<key>WFWorkflowActionParameters</key>
+			<dict>
+				<key>UUID</key>
+				<string>28264E56-E34F-5AA7-9858-3AB90ED9FADE</string>
+				<key>GroupingIdentifier</key>
+				<string>F20A296D-AC8C-5818-B053-23443F5E7E8F</string>
+				<key>WFControlFlowMode</key>
+				<integer>0</integer>
+				<key>WFInput</key>
+				<dict>
+					<key>Type</key>
+					<string>Variable</string>
+					<key>Variable</key>
+					<dict>
+						<key>Value</key>
+						<dict>
+							<key>Type</key>
+							<string>Variable</string>
+							<key>VariableName</key>
+							<string>单笔步骤</string>
+							<key>Aggrandizements</key>
+							<array>
+								<dict>
+									<key>Type</key>
+									<string>WFPropertyVariableAggrandizement</string>
+									<key>PropertyName</key>
+									<string>步骤状态</string>
+									<key>PropertyUserInfo</key>
+									<string>status</string>
+								</dict>
+							</array>
+						</dict>
+						<key>WFSerializationType</key>
+						<string>WFTextTokenAttachment</string>
+					</dict>
+				</dict>
+				<key>WFCondition</key>
+				<integer>4</integer>
+				<key>WFConditionalActionString</key>
+				<string>cancelled</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFWorkflowActionIdentifier</key>
+			<string>is.workflow.actions.exit</string>
+			<key>WFWorkflowActionParameters</key>
+			<dict>
+				<key>UUID</key>
+				<string>E579A5C8-8065-58F9-8B4E-96100DA4C0D0</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFWorkflowActionIdentifier</key>
+			<string>is.workflow.actions.conditional</string>
+			<key>WFWorkflowActionParameters</key>
+			<dict>
+				<key>UUID</key>
+				<string>39AB3042-33B9-5063-8796-28633D0EA34D</string>
+				<key>GroupingIdentifier</key>
+				<string>F20A296D-AC8C-5818-B053-23443F5E7E8F</string>
 				<key>WFControlFlowMode</key>
 				<integer>2</integer>
 			</dict>
@@ -931,11 +1222,63 @@
 		</dict>
 		<dict>
 			<key>WFWorkflowActionIdentifier</key>
-			<string>is.workflow.actions.exit</string>
+			<string>com.tntlikely.beecount.ContinueSingleBillingIntent</string>
 			<key>WFWorkflowActionParameters</key>
 			<dict>
 				<key>UUID</key>
-				<string>A990D049-4789-5930-B906-F476FDC7EAD5</string>
+				<string>EA60400F-ED46-54E6-8AFA-1842CEDCC98D</string>
+				<key>AppIntentDescriptor</key>
+				<dict>
+					<key>AppIntentIdentifier</key>
+					<string>ContinueSingleBillingIntent</string>
+					<key>BundleIdentifier</key>
+					<string>com.tntlikely.beecount</string>
+					<key>Name</key>
+					<string>蜜蜂记账</string>
+					<key>TeamIdentifier</key>
+					<string>0000000000</string>
+					<key>ActionRequiresAppInstallation</key>
+					<true/>
+				</dict>
+				<key>step</key>
+				<dict>
+					<key>Value</key>
+					<dict>
+						<key>Type</key>
+						<string>Variable</string>
+						<key>VariableName</key>
+						<string>单笔步骤</string>
+					</dict>
+					<key>WFSerializationType</key>
+					<string>WFTextTokenAttachment</string>
+				</dict>
+				<key>hasResponse</key>
+				<false/>
+			</dict>
+		</dict>
+		<dict>
+			<key>WFWorkflowActionIdentifier</key>
+			<string>is.workflow.actions.setvariable</string>
+			<key>WFWorkflowActionParameters</key>
+			<dict>
+				<key>UUID</key>
+				<string>DDE8A414-9805-58A2-9B64-822887DB4270</string>
+				<key>WFVariableName</key>
+				<string>单笔步骤</string>
+				<key>WFInput</key>
+				<dict>
+					<key>Value</key>
+					<dict>
+						<key>Type</key>
+						<string>ActionOutput</string>
+						<key>OutputUUID</key>
+						<string>EA60400F-ED46-54E6-8AFA-1842CEDCC98D</string>
+						<key>OutputName</key>
+						<string>next-part-or-retry</string>
+					</dict>
+					<key>WFSerializationType</key>
+					<string>WFTextTokenAttachment</string>
+				</dict>
 			</dict>
 		</dict>
 		<dict>
@@ -972,9 +1315,9 @@
 				<key>UUID</key>
 				<string>D0852C36-1C49-5CAE-B38A-A0EB72415342</string>
 				<key>WFAlertActionTitle</key>
-				<string>未入账</string>
+				<string>已停止</string>
 				<key>WFAlertActionMessage</key>
-				<string>已达编辑次数上限，未自动保存。请重新运行。</string>
+				<string>已达编辑次数上限，当前未确认内容及剩余金额不自动入账；拆分中已保存的笔保留。若有结果未知请先查询原请求，不要重新记入原总额。</string>
 			</dict>
 		</dict>
 		<dict>

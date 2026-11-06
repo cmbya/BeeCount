@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import UIKit
 import ImageIO
 import UniformTypeIdentifiers
@@ -335,13 +336,13 @@ enum ConfirmedBilling {
     }
     // Attachment is independent from recognition. Encode only after confirmation;
     // no permanent files or AI calls are made by this helper.
-    static func attachmentPayload(_ attachment: IntentFile) throws -> [String: Any] {
+    static func attachmentPayload(_ attachment: IntentFile, keepOriginal override: Bool? = nil) throws -> [String: Any] {
         let data = try imageData(attachment)
         guard UIImage(data: data) != nil,
               let source = CGImageSourceCreateWithData(data as CFData, nil) else {
             throw ShortcutBillingError(message: "附带图片无效，未入账")
         }
-        let keepOriginal = UserDefaults.standard.bool(forKey: "flutter.attachmentKeepOriginal")
+        let keepOriginal = override ?? UserDefaults.standard.bool(forKey: "flutter.attachmentKeepOriginal")
         let bytes: Data
         let ext: String
         if keepOriginal {
@@ -534,6 +535,7 @@ enum BillingStepFlow {
         guard ["editing", "input"].contains(outer["status"] as? String ?? ""),
               let encodedState = outer["state"] as? String else { throw ShortcutBillingError(message: "请传入上一次编辑步骤的完整结果") }
         let state = try ConfirmedBilling.decode(encodedState)
+        let progressive = outer["splitContext"] as? [String: Any]
         guard state["version"] as? Int == 1, let draft = state["draft"] as? String,
               var events = state["events"] as? [[String: String]], events.count <= 2000 else { throw ShortcutBillingError(message: "编辑状态无效或步骤过多") }
         if outer["status"] as? String == "input" {
@@ -550,7 +552,7 @@ enum BillingStepFlow {
         }, input: { _ in throw ShortcutBillingError(message: "模板模式不能调用旧系统输入") }, externalInput: { request in
             let key = try ConfirmedBilling.encode(request.payload)
             return try await replay.recorded("input", request: key) { throw BillingInputSuspension(request: request) }
-        }, showIncompleteDraft: state["showIncompleteDraft"] as? Bool ?? false, singleOnly: state["singleOnly"] as? Bool ?? false, call: { payload in
+        }, showIncompleteDraft: state["showIncompleteDraft"] as? Bool ?? false, singleOnly: state["singleOnly"] as? Bool ?? false, progressive: progressive, call: { payload in
             // Replay historical options to restore exact menu identities. Final
             // validation and commit always use live references, never cached success.
             let key = try ConfirmedBilling.encode(payload)
@@ -575,14 +577,23 @@ enum BillingStepFlow {
         do {
             let submission = try await editor.runEditor()
             guard replay.cursor == replay.events.count else { throw ShortcutBillingError(message: "编辑步骤不完整，未入账") }
-            return try ConfirmedBilling.encode(["status": "confirmed", "submission": submission, "singleOnly": state["singleOnly"] as? Bool ?? false])
+            let result = try ConfirmedBilling.decode(submission)
+            if result["progressiveSplitStart"] as? Bool == true {
+                return try ConfirmedBilling.encode(["status": "split-start", "submission": submission, "singleOnly": true])
+            }
+            var envelope: [String: Any] = ["status": progressive == nil ? "confirmed" : "split-confirmed", "submission": submission,
+                "singleOnly": state["singleOnly"] as? Bool ?? false]
+            if let progressive { envelope["splitContext"] = progressive }
+            return try ConfirmedBilling.encode(envelope)
         } catch let pending as BillingInputSuspension {
             let next: [String: Any] = ["version": 1, "draft": draft, "events": replay.events, "showIncompleteDraft": state["showIncompleteDraft"] as? Bool ?? false, "singleOnly": state["singleOnly"] as? Bool ?? false]
-            return try ConfirmedBilling.encode(["status": "input", "state": ConfirmedBilling.encode(next), "input": pending.request.payload])
+            var envelope: [String: Any] = ["status": "input", "state": try ConfirmedBilling.encode(next), "input": pending.request.payload]
+            if let progressive { envelope["splitContext"] = progressive }
+            return try ConfirmedBilling.encode(envelope)
         } catch is CancellationError {
-            return try ConfirmedBilling.encode(["status": "cancelled"])
+            return try ProgressiveSplitFlow.cancelled(progressive)
         } catch let error as ShortcutBillingError where error.message == "已取消，未入账" {
-            return try ConfirmedBilling.encode(["status": "cancelled"])
+            return try ProgressiveSplitFlow.cancelled(progressive)
         }
     }
 }
@@ -764,6 +775,7 @@ final class ConfirmedBillingEditor {
     let externalInput: ((BillingInputRequest) async throws -> String)?
     let showIncompleteDraft: Bool
     let singleOnly: Bool
+    let progressive: [String: Any]?
 
     init(draft: String,
          choose: @escaping ([String], String) async throws -> String,
@@ -771,11 +783,13 @@ final class ConfirmedBillingEditor {
          externalInput: ((BillingInputRequest) async throws -> String)? = nil,
          showIncompleteDraft: Bool = false,
          singleOnly: Bool = false,
+         progressive: [String: Any]? = nil,
          call: @escaping ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call) {
         self.draft = draft; self.choose = choose; self.input = input; self.call = call
         self.externalInput = externalInput
         self.showIncompleteDraft = showIncompleteDraft
         self.singleOnly = singleOnly
+        self.progressive = progressive
     }
 
     private func ask(_ prompt: String, current: String = "", kind: String = "text") async throws -> String {
@@ -892,6 +906,14 @@ final class ConfirmedBillingEditor {
             candidate = [:]
         }
         var total = candidate["amountMinor"] as? Int ?? 0
+        if let progressive {
+            _ = try ProgressiveSplitFlow.context(progressive)
+            guard type == "expense", ledgerId == (progressive["ledgerId"] as? Int),
+                  currency == (progressive["currency"] as? String),
+                  (candidate["accountId"] as? Int) == (progressive["accountId"] as? Int) else {
+                throw ShortcutBillingError(message: "拆分的账本、账户、币种和类型已锁定；不会修改已保存账单")
+            }
+        }
         // Text drafts must reach review before requesting any missing fields.
         if !showIncompleteDraft {
             while total <= 0 {
@@ -913,6 +935,9 @@ final class ConfirmedBillingEditor {
             toAccountId = nil
             if !showIncompleteDraft { toAccountId = try await pick(accounts.filter { $0["id"] as? Int != accountId }, "选择转入账户") }
         }
+        if let progressive, accountId == nil {
+            throw ShortcutBillingError(message: try ProgressiveSplitFlow.summary(progressive) + "\n原付款账户已失效或不可用，当前笔未保存，已保存账单保留。请先在 App 处理账户，不得换账户继续此会话。")
+        }
         var time = candidate["occurredAt"] as? String ?? source["editorTime"] as? String ?? ISO8601DateFormatter().string(from: Date())
         var entries: [[String: Any]] = [["amountMinor": total, "note": candidate["note"] as? String ?? "",
             "tagIds": singleOnly ? Array(Set(candidate["tagIds"] as? [Int] ?? defaults["tagIds"] as? [Int] ?? [])).sorted() : Array((candidate["tagIds"] as? [Int] ?? defaults["tagIds"] as? [Int] ?? []).prefix(1)),
@@ -932,16 +957,42 @@ final class ConfirmedBillingEditor {
             let entry = entries.first ?? [:]
             let tagNames = (entry["tagIds"] as? [Int] ?? []).map { ConfirmedBilling.label($0, tags) }.joined(separator: "、")
             let directFields = single ? ["金额"] + (type == "transfer" ? [] : ["分类"]) + ["账户", "时间", "备注", "标签"] + (type == "expense" ? ["不计预算"] : []) : ["编辑明细", "删除明细", "修改原付款金额", "记账账户", "日期时间"]
-            let actions = directFields + (type == "transfer" ? ["转入账户"] : []) + (type == "expense" && !singleOnly ? ["拆分或新增明细"] : []) + ["账本", "收支类型", "确认提交", "取消提交", "刷新有效选项"]
-            let selected = try await fields(actions, title: singleOnly ? "单笔确认（最终确认才入账）\n" + typeName(type) + " · " + currency : single ? "确认" + typeName(type) + "信息" : summary, values: [
+            let actions: [String]
+            let menuTitle: String
+            if let progressive {
+                actions = directFields.filter { $0 != "账户" } + ["确认保存此笔", "放弃当前笔并结束", "刷新有效选项"]
+                menuTitle = try ProgressiveSplitFlow.summary(progressive) + "\n编辑第 " + String((progressive["savedCount"] as? Int ?? 0) + 1) + " 笔 · " + accountSummary
+            } else {
+                actions = directFields + (type == "transfer" ? ["转入账户"] : []) +
+                    (type == "expense" ? (singleOnly ? ["拆分并逐笔保存"] : ["拆分或新增明细"]) : []) +
+                    ["账本", "收支类型", "确认提交", "取消提交", "刷新有效选项"]
+                menuTitle = singleOnly ? "单笔确认（最终确认才入账）\n" + typeName(type) + " · " + currency : single ? "确认" + typeName(type) + "信息" : summary
+            }
+            let selected = try await fields(actions, title: menuTitle, values: [
                 "金额": total > 0 ? ConfirmedBilling.money(total, digits: digits) : "待填写", "分类": entry["categoryId"] == nil ? "未分类" : ConfirmedBilling.label(entry["categoryId"] as? Int, categories),
                 "账户": ConfirmedBilling.label(accountId, accounts), "转入账户": ConfirmedBilling.label(toAccountId, accounts),
                 "时间": ConfirmedBilling.displayTime(time), "备注": entry["note"] as? String ?? "", "标签": tagNames.isEmpty ? "无" : tagNames,
                 "不计预算": entry["excludeFromBudget"] as? Bool == true ? "不计入预算" : "计入预算",
                 "账本": ledgerName, "收支类型": typeName(type)
             ])
-            let action = ["金额": "修改原付款金额", "账户": "记账账户", "时间": "日期时间", "取消提交": "取消整次记账"][selected] ?? selected
+            let action = ["金额": "修改原付款金额", "账户": "记账账户", "时间": "日期时间", "取消提交": "取消整次记账", "放弃当前笔并结束": "取消整次记账", "确认保存此笔": "确认提交"][selected] ?? selected
+            if progressive != nil && ["账本", "收支类型", "记账账户", "转入账户", "拆分并逐笔保存", "拆分或新增明细", "编辑明细", "删除明细"].contains(action) {
+                throw ShortcutBillingError(message: "逐笔拆分不能修改已锁定的总额、账本、账户或类型；已保存账单保留")
+            }
             switch action {
+            case "拆分并逐笔保存":
+                guard singleOnly, progressive == nil, type == "expense", total > 0, total <= 999999999999 else {
+                    _ = try await choose(["返回账单"], "请先填写有效的支出总额，再拆分")
+                    continue
+                }
+                guard let id = accountId, accounts.contains(where: { $0["id"] as? Int == id }) else {
+                    accountId = try await pick(accounts, "拆分前选择付款账户")
+                    continue
+                }
+                return try ConfirmedBilling.encode(["schemaVersion": 1, "progressiveSplitStart": true, "confirmed": false,
+                    "requestId": source["requestId"] as? String ?? UUID().uuidString,
+                    "ledgerId": ledgerId, "accountId": id, "currency": currency, "type": "expense", "occurredAt": time,
+                    "minorDigits": digits, "originalAmountMinor": total, "entries": entries])
             case "分类":
                 if singleOnly {
                     let labels = categories.enumerated().map { String($0.offset + 1) + ". " + ($0.element["name"] as? String ?? "") }
@@ -1037,6 +1088,10 @@ final class ConfirmedBillingEditor {
                 catch is CancellationError { continue }
                 catch { _ = try await choose(["返回账单"], error.localizedDescription); continue }
                 if let amount = try? ConfirmedBilling.minor(value, digits: digits) {
+                    if let progressive, amount > (progressive["totalMinor"] as? Int ?? 0) - (progressive["paidMinor"] as? Int ?? 0) {
+                        _ = try await choose(["返回修改"], "此笔不能超过剩余未记金额，已保留原值")
+                        continue
+                    }
                     total = amount
                     if !didSplit && entries.count == 1 { entries[0]["amountMinor"] = amount }
                 } else { _ = try await choose(["返回修改"], "请输入有效正金额") }
@@ -1095,10 +1150,21 @@ final class ConfirmedBillingEditor {
                 }
             case "确认提交":
                 if singleOnly && entries.count != 1 { throw ShortcutBillingError(message: "单笔流程不能提交多笔，未入账") }
+                if let progressive {
+                    let remaining = (progressive["totalMinor"] as? Int ?? 0) - (progressive["paidMinor"] as? Int ?? 0)
+                    guard total > 0, total <= remaining,
+                          progressive["useAllRemaining"] as? Bool != true || total == remaining else {
+                        _ = try await choose(["返回修改"], "此笔须大于零、不超过余额；最后一笔须等于剩余未记金额")
+                        continue
+                    }
+                }
                 guard !entries.isEmpty, used == total, entries.allSatisfy({ entry in
                     (entry["amountMinor"] as? Int ?? 0) > 0 && (type == "transfer" || entry["categoryId"] == nil || categories.contains { $0["id"] as? Int == entry["categoryId"] as? Int })
                 }) else { _ = try await choose(["返回修改"], "金额尚未分配完、超额或已选分类失效，不能提交"); continue }
                 guard let confirmedAccountId = accountId, accounts.contains(where: { $0["id"] as? Int == confirmedAccountId }) else {
+                    if let progressive {
+                        throw ShortcutBillingError(message: try ProgressiveSplitFlow.summary(progressive) + "\n原付款账户已失效，当前笔未提交；已保存账单保留，不得换账户继续此会话。")
+                    }
                     accountId = try await pick(accounts, type == "income" ? "选择收款账户" : "选择付款或转出账户")
                     continue
                 }
@@ -1109,6 +1175,10 @@ final class ConfirmedBillingEditor {
                     "ledgerId": ledgerId, "accountId": confirmedAccountId, "currency": currency, "type": type, "occurredAt": time,
                     "originalAmountMinor": total, "entries": entries]
                 if type == "transfer" { submission["toAccountId"] = toAccountId }
+                if let progressive {
+                    submission["split"] = ["sessionId": progressive["sessionId"]!,
+                        "partIndex": (progressive["savedCount"] as? Int ?? 0) + 1, "totalMinor": progressive["totalMinor"]!]
+                }
                 do { _ = try await call(["operation": "validate", "submission": submission]) }
                 catch { _ = try await choose(["返回修改"], error.localizedDescription); continue }
                 return try ConfirmedBilling.encode(submission)
@@ -1939,18 +2009,20 @@ struct SingleBillingStep: TransientAppEntity {
     @Property(title: "当前内容") var currentText: String
     @Property(title: "当前数字") var currentNumber: Double
     @Property(title: "当前时间") var currentDate: Date
+    @Property(title: "结果说明") var resultMessage: String
     var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "单笔编辑步骤") }
     init() {
         state = ""; status = ""; prompt = ""; inputType = ""; currentText = ""; currentNumber = 0
-        currentDate = Date(timeIntervalSince1970: 0)
+        currentDate = Date(timeIntervalSince1970: 0); resultMessage = ""
     }
     @MainActor init(_ envelope: String) throws {
         self.init()
         let object = try ConfirmedBilling.decode(envelope)
-        guard let phase = object["status"] as? String, ["editing", "input", "confirmed", "cancelled"].contains(phase) else {
+        guard let phase = object["status"] as? String, ["editing", "input", "confirmed", "cancelled", "split-confirmed", "split-retry", "split-next", "split-ended"].contains(phase) else {
             throw ShortcutBillingError(message: "单笔步骤格式无效，未入账")
         }
         state = envelope; status = phase
+        resultMessage = object["message"] as? String ?? ""
         if phase == "input" {
             guard let request = object["input"] as? [String: Any],
                   let message = request["prompt"] as? String,
@@ -1979,6 +2051,8 @@ enum SingleBillingFlow {
     static func checkSingle(_ step: SingleBillingStep) throws {
         let outer = try ConfirmedBilling.decode(step.state)
         guard outer["status"] as? String == step.status else { throw ShortcutBillingError(message: "步骤状态不一致，未入账") }
+        if let progressive = outer["splitContext"] as? [String: Any] { _ = try ProgressiveSplitFlow.context(progressive) }
+        else if step.status.hasPrefix("split-") { throw ShortcutBillingError(message: "拆分会话缺失，请停止并查询已保存结果") }
         if ["editing", "input"].contains(step.status) {
             guard let raw = outer["state"] as? String else { throw ShortcutBillingError(message: "单笔状态缺失，未入账") }
             let state = try ConfirmedBilling.decode(raw)
@@ -1991,6 +2065,12 @@ enum SingleBillingFlow {
                         choose: @escaping ([String], String) async throws -> String,
                         call: @escaping ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call) async throws -> SingleBillingStep {
         try checkSingle(step)
+        if ["split-next", "split-retry"].contains(step.status) {
+            let next = try await ProgressiveSplitFlow.next(step, choose: choose)
+            if next.status == "editing" { return try await advance(next, hasResponse: false, text: nil, number: nil, date: nil, choose: choose, call: call) }
+            return next
+        }
+        if step.status == "split-ended" { return step }
         guard ["editing", "input"].contains(step.status) else { throw ShortcutBillingError(message: "此步骤已结束，请勿继续编辑") }
         var response = text
         if step.status == "input", hasResponse {
@@ -2009,18 +2089,23 @@ enum SingleBillingFlow {
                 response = ISO8601DateFormatter().string(from: date)
             }
         }
-        return try SingleBillingStep(await BillingStepFlow.advance(step.state, response: response, hasResponse: hasResponse, choose: choose, call: call))
+        let result = try await BillingStepFlow.advance(step.state, response: response, hasResponse: hasResponse, choose: choose, call: call)
+        if (try ConfirmedBilling.decode(result))["status"] as? String == "split-start" {
+            let part = try ProgressiveSplitFlow.begin(result)
+            return try await advance(part, hasResponse: false, text: nil, number: nil, date: nil, choose: choose, call: call)
+        }
+        return try SingleBillingStep(result)
     }
     static func save(_ step: SingleBillingStep, attachment: IntentFile?,
                      commit: ([String: Any], IntentFile?) async throws -> String = { try await ConfirmedBilling.commit($0, attachment: $1) }) async throws -> String {
         try checkSingle(step)
         let outer = try ConfirmedBilling.decode(step.state)
-        guard step.status == "confirmed", let raw = outer["submission"] as? String else {
+        guard step.status == "confirmed", outer["splitContext"] == nil, let raw = outer["submission"] as? String else {
             throw ShortcutBillingError(message: "尚未最终确认，不可入账")
         }
         let submission = try ConfirmedBilling.decode(raw)
         guard submission["confirmed"] as? Bool == true,
-              let entries = submission["entries"] as? [[String: Any]], entries.count == 1 else {
+              let entries = submission["entries"] as? [[String: Any]], entries.count == 1, submission["split"] == nil else {
             throw ShortcutBillingError(message: "单笔提交内容无效，未入账")
         }
         // Existing commit validates live references and deduplicates request IDs.
@@ -2032,7 +2117,7 @@ enum SingleBillingFlow {
 struct StartSingleBillingIntent: AppIntent {
     static var isDiscoverable = true
     static var title: LocalizedStringResource = "开始单笔记账（系统输入）"
-    static var description: LocalizedStringResource = "图片/文字只识别一次，或手填预设。本动作只产生草稿；配合继续单笔确认、系统请求输入及最终保存。第一轮不含拆分。图片会发送给 App 配置的视觉服务。"
+    static var description: LocalizedStringResource = "图片/文字只识别一次，或手填预设。本动作只产生草稿；配合继续单笔确认、系统请求输入及最终保存。支出可进入逐笔拆分，需配合保存拆分当前笔。图片会发送给 App 配置的视觉服务。"
     static var openAppWhenRun = false
     @Parameter(title: "来源", default: .image) var source: SingleBillingSource
     @Parameter(title: "图片") var image: IntentFile?
@@ -2110,6 +2195,245 @@ struct SaveSingleBillingIntent: AppIntent {
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
         let saved = try await SingleBillingFlow.save(step, attachment: attachment)
         return .result(value: saved, dialog: try CustomBilling.result(saved))
+    }
+}
+
+
+// MARK: - Progressive expense split: each confirmation commits one bill
+
+@available(iOS 16.0, *)
+@MainActor
+enum ProgressiveSplitFlow {
+    static func context(_ value: [String: Any]) throws -> [String: Any] {
+        guard value["version"] as? Int == 1,
+              let session = value["sessionId"] as? String, UUID(uuidString: session) != nil,
+              let total = value["totalMinor"] as? Int, total > 0, total <= 999999999999,
+              let paid = value["paidMinor"] as? Int, paid >= 0, paid <= total,
+              let count = value["savedCount"] as? Int, count >= 0, count <= 100,
+              let digits = value["minorDigits"] as? Int, (0...4).contains(digits),
+              let ledger = value["ledgerId"] as? Int, ledger > 0,
+              let account = value["accountId"] as? Int, account > 0,
+              let currency = value["currency"] as? String, currency.count == 3,
+              value["template"] is [String: Any] else {
+            throw ShortcutBillingError(message: "拆分进度无效，请停止并查询已保存账单，不要重新记入原总额")
+        }
+        return value
+    }
+    static func summary(_ value: [String: Any]) throws -> String {
+        let value = try context(value)
+        let total = value["totalMinor"] as! Int
+        let paid = value["paidMinor"] as! Int
+        let digits = value["minorDigits"] as! Int
+        return "逐笔拆分 · 原总额 " + ConfirmedBilling.money(total, digits: digits) + " " + (value["currency"] as! String) +
+            "\n已记 " + String(value["savedCount"] as! Int) + " 笔 / " + ConfirmedBilling.money(paid, digits: digits) +
+            " · 剩余未记 " + ConfirmedBilling.money(total - paid, digits: digits)
+    }
+    static func envelope(_ phase: String, context: [String: Any], submission: String? = nil, message: String? = nil) throws -> SingleBillingStep {
+        var result: [String: Any] = ["status": phase, "singleOnly": true, "splitContext": try self.context(context)]
+        if let submission { result["submission"] = submission }
+        if let message { result["message"] = message }
+        return try SingleBillingStep(ConfirmedBilling.encode(result))
+    }
+    static func cancelled(_ value: [String: Any]?) throws -> String {
+        guard let value else { return try ConfirmedBilling.encode(["status": "cancelled"]) }
+        return try envelope("split-ended", context: value,
+            message: summary(value) + "\n已放弃当前未保存笔，已保存账单保留；剩余金额不自动入账。云端同步请查看 App。").state
+    }
+    static func partID(_ session: String, index: Int) -> String {
+        // Stable per-session/slot ID, including retries of an older state.
+        let hash = Array(SHA256.hash(data: Data((session.lowercased() + "/part/" + String(index)).utf8)))
+        var bytes = Array(hash.prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x50
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        let indexes = [8, 12, 16, 20]
+        var result = ""
+        for (index, char) in hex.enumerated() {
+            if indexes.contains(index) { result += "-" }
+            result.append(char)
+        }
+        return result
+    }
+    static func begin(_ start: String) throws -> SingleBillingStep {
+        let outer = try ConfirmedBilling.decode(start)
+        guard outer["status"] as? String == "split-start", let raw = outer["submission"] as? String else {
+            throw ShortcutBillingError(message: "请从当前未保存的支出草稿进入拆分")
+        }
+        let bill = try ConfirmedBilling.decode(raw)
+        guard bill["progressiveSplitStart"] as? Bool == true, bill["confirmed"] as? Bool == false,
+              bill["type"] as? String == "expense", let session = bill["requestId"] as? String,
+              let entries = bill["entries"] as? [[String: Any]], entries.count == 1,
+              let date = bill["occurredAt"] as? String else {
+            throw ShortcutBillingError(message: "拆分起点无效，原账单未保存")
+        }
+        var initial = entries[0]
+        initial["occurredAt"] = date
+        let ctx: [String: Any] = ["version": 1, "sessionId": session.lowercased(),
+            "totalMinor": bill["originalAmountMinor"] ?? 0, "paidMinor": 0, "savedCount": 0,
+            "ledgerId": bill["ledgerId"] ?? 0, "accountId": bill["accountId"] ?? 0,
+            "currency": bill["currency"] ?? "", "minorDigits": bill["minorDigits"] ?? -1,
+            "template": initial, "useAllRemaining": false]
+        return try part(ctx, useAll: false)
+    }
+    static func part(_ value: [String: Any], useAll: Bool) throws -> SingleBillingStep {
+        var value = try context(value)
+        let remaining = (value["totalMinor"] as! Int) - (value["paidMinor"] as! Int)
+        let count = value["savedCount"] as! Int
+        guard remaining > 0, count < 100 else { throw ShortcutBillingError(message: "余额为零或达到 100 笔上限，不能新增") }
+        value["useAllRemaining"] = useAll
+        var candidate = value["template"] as! [String: Any]
+        candidate["type"] = "expense"; candidate["amountMinor"] = remaining
+        candidate["accountId"] = value["accountId"]
+        let draft: [String: Any] = ["status": "draft", "requestId": partID(value["sessionId"] as! String, index: count + 1),
+            "ledgerId": value["ledgerId"]!, "currency": value["currency"]!, "candidates": [candidate]]
+        let state = try BillingStepFlow.start(ConfirmedBilling.encode(draft), showIncompleteDraft: true, singleOnly: true)
+        var outer = try ConfirmedBilling.decode(state)
+        outer["splitContext"] = value
+        return try SingleBillingStep(ConfirmedBilling.encode(outer))
+    }
+    static func next(_ step: SingleBillingStep,
+                     choose: ([String], String) async throws -> String) async throws -> SingleBillingStep {
+        let outer = try ConfirmedBilling.decode(step.state)
+        let ctx = try context(outer["splitContext"] as? [String: Any] ?? [:])
+        do {
+            if step.status == "split-retry" {
+                let selected = try await choose(["重试保存当前笔", "结束并稍后查询"],
+                    (outer["message"] as? String ?? "当前笔结果待确认") + "\n重试保持同一请求，不会另起一笔。")
+                guard let raw = outer["submission"] as? String else { throw ShortcutBillingError(message: "待查请求丢失，请在 App 查询，勿重记") }
+                if selected == "重试保存当前笔" { return try envelope("split-confirmed", context: ctx, submission: raw) }
+                let bill = try ConfirmedBilling.decode(raw)
+                return try envelope("split-ended", context: ctx, submission: raw,
+                    message: summary(ctx) + "\n当前笔结果尚未确认；它可能已经保存。请求 ID：" + (bill["requestId"] as? String ?? "") +
+                    "\n已知已保存账单不撤销。请查询此请求，勿重新开始记入原总额。")
+            }
+            guard step.status == "split-next" else { throw ShortcutBillingError(message: "此步骤不能新增拆分") }
+            let selected = try await choose(["继续拆下一笔", "剩余作为最后一笔编辑", "结束拆分"],
+                summary(ctx) + "\n上一笔已在本机保存；云端同步请看 App。结束不会补记余额。")
+            if selected == "继续拆下一笔" { return try part(ctx, useAll: false) }
+            if selected == "剩余作为最后一笔编辑" { return try part(ctx, useAll: true) }
+            return try envelope("split-ended", context: ctx,
+                message: summary(ctx) + "\n已结束，已保存账单保留，剩余金额未入账。")
+        } catch is CancellationError {
+            if step.status == "split-retry" {
+                return try envelope("split-ended", context: ctx, submission: outer["submission"] as? String,
+                    message: summary(ctx) + "\n当前笔结果可能尚未确认，请查询原请求；不要重记。")
+            }
+            return try SingleBillingStep(cancelled(ctx))
+        }
+    }
+    static func checkedSubmission(_ outer: [String: Any], context ctx: [String: Any]) throws -> [String: Any] {
+        guard let raw = outer["submission"] as? String else { throw ShortcutBillingError(message: "缺少当前笔确认内容") }
+        let bill = try ConfirmedBilling.decode(raw)
+        let index = (ctx["savedCount"] as! Int) + 1
+        let remaining = (ctx["totalMinor"] as! Int) - (ctx["paidMinor"] as! Int)
+        guard bill["confirmed"] as? Bool == true, bill["type"] as? String == "expense",
+              bill["requestId"] as? String == partID(ctx["sessionId"] as! String, index: index),
+              bill["ledgerId"] as? Int == ctx["ledgerId"] as? Int,
+              bill["accountId"] as? Int == ctx["accountId"] as? Int,
+              bill["currency"] as? String == ctx["currency"] as? String,
+              let split = bill["split"] as? [String: Any], split["sessionId"] as? String == ctx["sessionId"] as? String,
+              split["totalMinor"] as? Int == ctx["totalMinor"] as? Int, split["partIndex"] as? Int == index,
+              let entries = bill["entries"] as? [[String: Any]], entries.count == 1,
+              let amount = entries[0]["amountMinor"] as? Int, amount > 0, amount <= remaining,
+              bill["originalAmountMinor"] as? Int == amount,
+              ctx["useAllRemaining"] as? Bool != true || amount == remaining else {
+            throw ShortcutBillingError(message: "当前笔与拆分进度不符，不提交；请查询已保存结果")
+        }
+        return bill
+    }
+    static func applied(_ receipt: [String: Any], bill: [String: Any], context initial: [String: Any]) throws -> SingleBillingStep {
+        var ctx = try context(initial)
+        let amount = bill["originalAmountMinor"] as! Int
+        let expectedCount = (ctx["savedCount"] as! Int) + 1
+        let expectedPaid = (ctx["paidMinor"] as! Int) + amount
+        let total = ctx["totalMinor"] as! Int
+        guard receipt["status"] as? String == "committed", receipt["requestId"] as? String == bill["requestId"] as? String,
+              receipt["count"] as? Int == 1, receipt["type"] as? String == "expense",
+              receipt["totalAmountMinor"] as? Int == amount, receipt["currency"] as? String == ctx["currency"] as? String,
+              let split = receipt["split"] as? [String: Any], split["sessionId"] as? String == ctx["sessionId"] as? String,
+              split["partIndex"] as? Int == expectedCount, split["savedCount"] as? Int == expectedCount,
+              split["totalMinor"] as? Int == total, split["paidMinor"] as? Int == expectedPaid,
+              split["remainingMinor"] as? Int == total - expectedPaid else {
+            throw ShortcutBillingError(message: "保存回执与当前笔不一致，余额未推进，请查询原请求")
+        }
+        ctx["paidMinor"] = expectedPaid; ctx["savedCount"] = expectedCount
+        var last = ((bill["entries"] as? [[String: Any]]) ?? [[:]])[0]
+        last["occurredAt"] = bill["occurredAt"]
+        ctx["template"] = last
+        let end = expectedPaid == total || expectedCount == 100
+        return try envelope(end ? "split-ended" : "split-next", context: ctx,
+            message: summary(ctx) + (expectedPaid == total ? "\n全部拆分已在本机入账。" : expectedCount == 100 ? "\n已达 100 笔上限，剩余未记，不自动保存。" : "\n当前笔已保存，可继续或结束。") + "云端同步请查看 App。")
+    }
+    static func save(_ step: SingleBillingStep, attachment: IntentFile?,
+                     call: ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call) async throws -> SingleBillingStep {
+        try SingleBillingFlow.checkSingle(step)
+        guard step.status == "split-confirmed" else { throw ShortcutBillingError(message: "请先确认当前拆分笔，未提交") }
+        let outer = try ConfirmedBilling.decode(step.state)
+        let ctx = try context(outer["splitContext"] as? [String: Any] ?? [:])
+        let bill = try checkedSubmission(outer, context: ctx)
+        var retryRaw = outer["submission"] as! String
+        var payload = bill
+        var attemptedPayload = false
+        do {
+            var frozen = bill["splitAttachment"] as? [String: Any]
+            let hadAttachment = frozen?["present"] as? Bool ?? (attachment != nil)
+            if hadAttachment {
+                guard let attachment else { throw ShortcutBillingError(message: "请继续连接原图到拆分保存动作，不能改变待重试请求的附件") }
+                let keepOriginal = frozen?["keepOriginal"] as? Bool ?? UserDefaults.standard.bool(forKey: "flutter.attachmentKeepOriginal")
+                let prepared = try ConfirmedBilling.attachmentPayload(attachment, keepOriginal: keepOriginal)
+                guard let encoded = prepared["dataBase64"] as? String, let bytes = Data(base64Encoded: encoded),
+                      let ext = prepared["extension"] as? String else { throw ShortcutBillingError(message: "附件准备失败，未提交") }
+                let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+                if let frozen {
+                    guard frozen["sha256"] as? String == digest, frozen["extension"] as? String == ext else {
+                        throw ShortcutBillingError(message: "附件与待重试原图不一致，请恢复原图，不能更改当前请求")
+                    }
+                } else { frozen = ["present": true, "keepOriginal": keepOriginal, "extension": ext, "sha256": digest] }
+                payload["attachment"] = prepared
+            } else {
+                guard attachment == nil else { throw ShortcutBillingError(message: "当前待重试请求原本没有附件，不能中途增加") }
+                frozen = ["present": false]
+            }
+            // Retain only attachment identity/settings in state, never base64
+            // image bytes: large originals must not overflow the state budget.
+            var retryBill = bill
+            retryBill["splitAttachment"] = frozen
+            retryRaw = try ConfirmedBilling.encode(retryBill)
+            payload.removeValue(forKey: "splitAttachment")
+            attemptedPayload = true
+            // Query also checks canonical digest, including an explicitly chosen
+            // attachment. Never accept a different payload with the same UUID.
+            let found = try await call(["operation": "query_split", "submission": payload])
+            if found["status"] as? String == "committed" { return try applied(found, bill: bill, context: ctx) }
+            guard found["status"] as? String == "not_found" else { throw ShortcutBillingError(message: "当前笔查询结果无效") }
+            UserDefaults.standard.set(bill["requestId"] as? String, forKey: "confirmedBillingLastRequestId")
+            let receipt = try await call(["operation": "commit", "submission": payload])
+            return try applied(receipt, bill: bill, context: ctx)
+        } catch is CancellationError { throw CancellationError() }
+        catch {
+            // A commit may have completed before its reply was lost. Reconcile
+            // the SAME payload, do not consume money on an error alone.
+            if attemptedPayload, let receipt = try? await call(["operation": "query_split", "submission": payload]),
+               receipt["status"] as? String == "committed",
+               let next = try? applied(receipt, bill: bill, context: ctx) { return next }
+            return try envelope("split-retry", context: ctx, submission: retryRaw,
+                message: summary(ctx) + "\n当前笔保存未完成或结果未知，余额尚未推进。请求 ID：" + (bill["requestId"] as? String ?? "") +
+                "\n请用同一步骤重试；若已在本机保存会复用回执，不另记一笔。" + error.localizedDescription)
+        }
+    }
+}
+
+@available(iOS 16.0, *)
+struct SaveProgressiveSplitIntent: AppIntent {
+    static var isDiscoverable = true
+    static var title: LocalizedStringResource = "保存拆分当前笔（逐笔入账）"
+    static var description: LocalizedStringResource = "仅当前笔已确认时真实入账；成功才更新余额。重试沿用同请求，失败返回待重试步骤，已保存的笔不会因结束而撤销。"
+    static var openAppWhenRun = false
+    @Parameter(title: "当前确认步骤") var step: SingleBillingStep
+    @Parameter(title: "附带图片（可选）", inputConnectionBehavior: .never) var attachment: IntentFile?
+    static var parameterSummary: some ParameterSummary { Summary("保存拆分当前笔 \(\.$step)") { \.$attachment } }
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<SingleBillingStep> {
+        .result(value: try await ProgressiveSplitFlow.save(step, attachment: attachment))
     }
 }
 
