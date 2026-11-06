@@ -89,6 +89,7 @@ class RunnerTests: XCTestCase {
     XCTAssertFalse(BillingOptionsIntent.isDiscoverable)
     XCTAssertFalse(ImageBillingDraftIntent.isDiscoverable)
     XCTAssertFalse(TextBillingDraftIntent.isDiscoverable)
+    XCTAssertFalse(BillingValueInputIntent.isDiscoverable)
     XCTAssertFalse(TextBillingTemplateStartIntent.isDiscoverable)
     XCTAssertFalse(EditBillingDraftIntent.isDiscoverable)
     XCTAssertFalse(CommitConfirmedBillingIntent.isDiscoverable)
@@ -1017,6 +1018,181 @@ class RunnerTests: XCTestCase {
     }
     XCTAssertEqual(events, ["request.started", "request.error code=42"])
     XCTAssertFalse(events.joined().contains("private"))
+  }
+
+  // Handoff tests inject menu/AI/store responses. They verify state and result
+  // routing, not system parameter presentation, keyboard prefill or host chaining.
+  @available(iOS 16.0, *)
+  @MainActor
+  func testHandoffRepeatedNoteAndAmountKeepsOneDraftAndSingleFinalCommit() async throws {
+    var choices = ["备注", "备注", "金额", "确认提交"]
+    var commits = 0
+    let draft = try editorDraft()
+    let requestID = try XCTUnwrap(ConfirmedBilling.decode(draft)["requestId"] as? String)
+    let choose: ([String], String) async throws -> String = { values, _ in
+      let action = self.menuValue(choices.removeFirst(), values)
+      XCTAssertTrue(values.contains(action)); return action
+    }
+    let call: ([String: Any]) async throws -> [String: Any] = { request in
+      XCTAssertNotEqual(request["operation"] as? String, "recognize")
+      XCTAssertNotEqual(request["operation"] as? String, "commit")
+      return request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions()
+    }
+    let commit: ([String: Any], IntentFile?) async throws -> String = { submission, _ in
+      commits += 1
+      XCTAssertEqual(submission["requestId"] as? String, requestID)
+      XCTAssertEqual(submission["originalAmountMinor"] as? Int, 12345)
+      XCTAssertEqual((submission["entries"] as? [[String: Any]])?.first?["note"] as? String, "最终备注")
+      return "saved"
+    }
+    var outcome = try await BillingHandoff.advance(BillingStepFlow.start(draft), choose: choose, call: call, commit: commit)
+    for (index, answer) in ["第一次", "最终备注", "123.45"].enumerated() {
+      guard case let .input(state, request) = outcome else { XCTFail("Expected input"); return }
+      XCTAssertEqual(request.currentValue, ["原文", "第一次", "300.00"][index])
+      XCTAssertEqual(request.inputType, index == 2 ? "number" : "text")
+      XCTAssertEqual(commits, 0)
+      outcome = try await BillingHandoff.advance(state, response: answer, hasResponse: true, choose: choose, call: call, commit: commit)
+    }
+    guard case let .finished(saved) = outcome else { XCTFail("Expected final save"); return }
+    XCTAssertEqual(saved, "saved")
+    XCTAssertEqual(commits, 1)
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testHandoffSplitResumesDetailAndPreservesIndependentNotes() async throws {
+    var choices = ["拆分或新增明细", "金额", "备注", "完成此笔", "拆分或新增明细", "完成此笔",
+      "编辑明细", "第 1 笔 80.00", "备注", "完成此笔", "确认提交"]
+    let choose: ([String], String) async throws -> String = { values, _ in
+      let action = self.menuValue(choices.removeFirst(), values)
+      XCTAssertTrue(values.contains(action)); return action
+    }
+    let call: ([String: Any]) async throws -> [String: Any] = { request in
+      XCTAssertNotEqual(request["operation"] as? String, "recognize")
+      return request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions()
+    }
+    var commits = 0
+    let commit: ([String: Any], IntentFile?) async throws -> String = { submission, _ in
+      commits += 1
+      let entries = try XCTUnwrap(submission["entries"] as? [[String: Any]])
+      XCTAssertEqual(entries.compactMap { $0["amountMinor"] as? Int }, [8000, 22000])
+      XCTAssertEqual(entries[0]["note"] as? String, "只改第一笔")
+      XCTAssertEqual(entries[1]["note"] as? String, "原文")
+      return "saved"
+    }
+    var outcome = try await BillingHandoff.advance(BillingStepFlow.start(editorDraft()), choose: choose, call: call, commit: commit)
+    for (index, answer) in ["80", "第一笔", "只改第一笔"].enumerated() {
+      guard case let .input(state, request) = outcome else { XCTFail("Expected nested input"); return }
+      XCTAssertEqual(request.currentValue, ["300.00", "原文", "第一笔"][index])
+      outcome = try await BillingHandoff.advance(state, response: answer, hasResponse: true, choose: choose, call: call, commit: commit)
+    }
+    guard case .finished = outcome else { XCTFail("Expected final save"); return }
+    XCTAssertEqual(commits, 1)
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testHandoffCancellationNeverCallsCommitAndNoTerminalOpenIntent() async throws {
+    let outcome = try await BillingHandoff.advance(BillingStepFlow.start(editorDraft()), choose: { _, _ in "取消提交" }, call: { _ in self.editorOptions() }, commit: { _, _ in XCTFail("Cancel cannot commit"); return "" })
+    guard case .cancelled = outcome else { XCTFail("Expected cancel"); return }
+    let terminal = try BillingHandoff.result(outcome, attachment: nil)
+    XCTAssertNil(terminal.opensIntent)
+    XCTAssertNotNil(terminal.dialog)
+    let stopped = try await BillingHandoff.advance(BillingStepFlow.start(editorDraft()), choose: { _, _ in throw CancellationError() }, call: { _ in self.editorOptions() }, commit: { _, _ in XCTFail(); return "" })
+    guard case .cancelled = stopped else { XCTFail("Host cancellation must not commit"); return }
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testHandoffCarriesAttachmentAndReferenceButDoesNotPresetRequiredInput() async throws {
+    let attachment = IntentFile(data: Data([1, 2, 3]), filename: "example.png", type: .png)
+    let outcome = try await BillingHandoff.advance(BillingStepFlow.start(editorDraft()), attachment: attachment, choose: { values, _ in self.menuValue("备注", values) }, call: { _ in self.editorOptions() }, commit: { _, _ in XCTFail(); return "" })
+    let result = try BillingHandoff.result(outcome, attachment: attachment)
+    let input = try XCTUnwrap(result.opensIntent)
+    XCTAssertEqual(input.currentValue, "原文")
+    XCTAssertEqual(input.attachment?.data, attachment.data)
+    XCTAssertNil(input.$value.defaultValue)
+    XCTAssertFalse(BillingValueInputIntent.openAppWhenRun)
+    guard case let .input(state, _) = outcome else { XCTFail(); return }
+    _ = try await BillingHandoff.advance(state, response: "修改", hasResponse: true, attachment: attachment, choose: { _, _ in "确认提交" }, call: { request in request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions() }, commit: { _, received in
+      XCTAssertEqual(received?.data, attachment.data)
+      return try ConfirmedBilling.encode(["status": "committed", "count": 1, "totalAmountMinor": 30000])
+    })
+    let finished = try BillingHandoff.result(.finished(ConfirmedBilling.encode(["status": "committed", "count": 1, "totalAmountMinor": 30000])), attachment: nil)
+    XCTAssertNil(finished.opensIntent)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testTextPreparationForHandoffRecognizesOnceAndShowsIncompleteReview() async throws {
+    var recognitions = 0
+    var menus = 0
+    let prepared = try await TextBillingEntry.run(text: "未标明金额的付款信息", configuration: [:], independentInput: true, choose: { _, _ in XCTFail("Preparation must not edit"); return "" }, input: { _ in XCTFail("No requestValue"); return "" }, call: { request in
+      if request["operation"] as? String == "recognize" {
+        recognitions += 1
+        return ["status": "draft", "ledgerId": 1, "currency": "CNY", "candidates": [["type": "expense", "note": "保留"]]]
+      }
+      return self.editorOptions()
+    }, commit: { _, _ in XCTFail("Preparation cannot commit"); return "" })
+    let outcome = try await BillingHandoff.advance(prepared, choose: { values, prompt in
+      menus += 1
+      XCTAssertEqual(prompt, "确认支出信息")
+      XCTAssertTrue(values.contains("金额：待填写"))
+      return "取消提交"
+    }, call: { request in XCTAssertEqual(request["operation"] as? String, "options"); return self.editorOptions() }, commit: { _, _ in XCTFail(); return "" })
+    guard case .cancelled = outcome else { XCTFail(); return }
+    XCTAssertEqual(recognitions, 1)
+    XCTAssertEqual(menus, 1)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testHandoffInvalidSplitAmountRequestsAgainWithoutCommit() async throws {
+    var choices = ["拆分或新增明细", "金额", "返回修改", "金额"]
+    let choose: ([String], String) async throws -> String = { values, _ in
+      let action = self.menuValue(choices.removeFirst(), values)
+      XCTAssertTrue(values.contains(action)); return action
+    }
+    let call: ([String: Any]) async throws -> [String: Any] = { _ in self.editorOptions() }
+    let commit: ([String: Any], IntentFile?) async throws -> String = { _, _ in XCTFail("Invalid input cannot commit"); return "" }
+    let first = try await BillingHandoff.advance(BillingStepFlow.start(editorDraft()), choose: choose, call: call, commit: commit)
+    guard case let .input(state, _) = first else { XCTFail(); return }
+    let retry = try await BillingHandoff.advance(state, response: "400", hasResponse: true, choose: choose, call: call, commit: commit)
+    guard case let .input(next, request) = retry else { XCTFail(); return }
+    XCTAssertEqual(request.currentValue, "300.00")
+    let cancelled = try await BillingHandoff.advance(next, response: "80", hasResponse: true, choose: { values, _ in values.contains("取消本次字段修改") ? "取消本次字段修改" : "取消提交" }, call: call, commit: commit)
+    // The detail cancellation returns to the original draft, not a saved row.
+    // Stop the outer host request as well.
+    guard case .cancelled = cancelled else { XCTFail("Must return to original draft then cancel, never save"); return }
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testManualIncomeAndTransferHandoffDoesNotRecognizeAgain() async throws {
+    for type in ["income", "transfer"] {
+      var source = try ConfirmedBilling.decode(editorDraft(type))
+      var candidates = try XCTUnwrap(source["candidates"] as? [[String: Any]])
+      if type == "transfer" { candidates[0]["toAccountId"] = 2 }
+      source["candidates"] = candidates
+      var choices = ["备注", "确认提交"]
+      let choose: ([String], String) async throws -> String = { values, _ in self.menuValue(choices.removeFirst(), values) }
+      let call: ([String: Any]) async throws -> [String: Any] = { request in
+        XCTAssertNotEqual(request["operation"] as? String, "recognize")
+        return request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions(type)
+      }
+      let first = try await BillingHandoff.advance(BillingStepFlow.start(ConfirmedBilling.encode(source)), choose: choose, call: call, commit: { _, _ in XCTFail(); return "" })
+      guard case let .input(state, _) = first else { XCTFail(); return }
+      let result = try await BillingHandoff.advance(state, response: "手填修改", hasResponse: true, choose: choose, call: call, commit: { submission, _ in
+        XCTAssertEqual(submission["type"] as? String, type)
+        XCTAssertEqual((submission["entries"] as? [[String: Any]])?.first?["note"] as? String, "手填修改")
+        return "saved"
+      })
+      guard case .finished = result else { XCTFail(); return }
+      XCTAssertTrue(choices.isEmpty)
+    }
   }
 
 }

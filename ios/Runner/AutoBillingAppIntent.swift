@@ -512,7 +512,7 @@ final class BillingStepReplay {
 @available(iOS 16.0, *)
 @MainActor
 enum BillingStepFlow {
-    static func start(_ draft: String) throws -> String {
+    static func start(_ draft: String, showIncompleteDraft: Bool = false) throws -> String {
         var object = try ConfirmedBilling.decode(draft)
         guard object["status"] as? String == "draft" else { throw ShortcutBillingError(message: "草稿无效") }
         // Fallback time must not change while replaying the same edit session.
@@ -523,7 +523,7 @@ enum BillingStepFlow {
         object["candidates"] = candidates
         object["editorTime"] = now
         if object["requestId"] == nil { object["requestId"] = UUID().uuidString }
-        let state: [String: Any] = ["version": 1, "draft": try ConfirmedBilling.encode(object), "events": [[String: String]]()]
+        let state: [String: Any] = ["version": 1, "draft": try ConfirmedBilling.encode(object), "events": [[String: String]](), "showIncompleteDraft": showIncompleteDraft]
         return try ConfirmedBilling.encode(["status": "editing", "state": ConfirmedBilling.encode(state)])
     }
 
@@ -550,7 +550,7 @@ enum BillingStepFlow {
         }, input: { _ in throw ShortcutBillingError(message: "模板模式不能调用旧系统输入") }, externalInput: { request in
             let key = try ConfirmedBilling.encode(request.payload)
             return try await replay.recorded("input", request: key) { throw BillingInputSuspension(request: request) }
-        }, call: { payload in
+        }, showIncompleteDraft: state["showIncompleteDraft"] as? Bool ?? false, call: { payload in
             // Replay historical options to restore exact menu identities. Final
             // validation and commit always use live references, never cached success.
             let key = try ConfirmedBilling.encode(payload)
@@ -577,13 +577,121 @@ enum BillingStepFlow {
             guard replay.cursor == replay.events.count else { throw ShortcutBillingError(message: "编辑步骤不完整，未入账") }
             return try ConfirmedBilling.encode(["status": "confirmed", "submission": submission])
         } catch let pending as BillingInputSuspension {
-            let next: [String: Any] = ["version": 1, "draft": draft, "events": replay.events]
+            let next: [String: Any] = ["version": 1, "draft": draft, "events": replay.events, "showIncompleteDraft": state["showIncompleteDraft"] as? Bool ?? false]
             return try ConfirmedBilling.encode(["status": "input", "state": ConfirmedBilling.encode(next), "input": pending.request.payload])
         } catch is CancellationError {
             return try ConfirmedBilling.encode(["status": "cancelled"])
         } catch let error as ShortcutBillingError where error.message == "已取消，未入账" {
             return try ConfirmedBilling.encode(["status": "cancelled"])
         }
+    }
+}
+
+// MARK: - Internal system-resolved input handoff (no user-built shortcut loop)
+// All drafts/transcripts travel as intent parameters. Nothing is stored on disk,
+// no global "current bill" exists, and only a confirmed envelope can commit.
+@available(iOS 16.0, *)
+@MainActor
+enum BillingHandoff {
+    typealias Result = IntentResultContainer<String, BillingValueInputIntent, Never, IntentDialog>
+
+    enum Outcome {
+        case input(String, BillingInputRequest)
+        case finished(String)
+        case cancelled
+    }
+
+    static func advance(_ state: String, response: String? = nil, hasResponse: Bool = false,
+                        attachment: IntentFile? = nil,
+                        choose: @escaping ([String], String) async throws -> String,
+                        call: @escaping ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call,
+                        commit: ([String: Any], IntentFile?) async throws -> String = { try await ConfirmedBilling.commit($0, attachment: $1) }) async throws -> Outcome {
+        let next = try await BillingStepFlow.advance(state, response: response, hasResponse: hasResponse, choose: choose, call: call)
+        let object = try ConfirmedBilling.decode(next)
+        switch object["status"] as? String {
+        case "input":
+            let request = try inputRequest(next)
+            return .input(next, request)
+        case "confirmed":
+            guard let submission = object["submission"] as? String else { throw ShortcutBillingError(message: "确认结果无效，未入账") }
+            return .finished(try await commit(ConfirmedBilling.decode(submission), attachment))
+        case "cancelled": return .cancelled
+        default: throw ShortcutBillingError(message: "账单编辑状态无效，未入账")
+        }
+    }
+
+    static func inputRequest(_ state: String) throws -> BillingInputRequest {
+        let object = try ConfirmedBilling.decode(state)
+        guard object["status"] as? String == "input",
+              let input = object["input"] as? [String: Any],
+              let prompt = input["prompt"] as? String,
+              let current = input["currentValue"] as? String,
+              let kind = input["inputType"] as? String, ["text", "number"].contains(kind) else {
+            throw ShortcutBillingError(message: "输入请求无效，未入账")
+        }
+        return BillingInputRequest(prompt: prompt, currentValue: current, inputType: kind)
+    }
+
+    static func plain(_ value: String, dialog: IntentDialog) -> Result {
+        // Use the iOS 16 generic result overload. Its concrete type stays the
+        // same on every branch; nil opensIntent prevents a terminal extra prompt.
+        var result: Result = .result(value: value, opensIntent: BillingValueInputIntent(), dialog: dialog)
+        result.opensIntent = nil
+        return result
+    }
+
+    static func result(_ outcome: Outcome, attachment: IntentFile?) throws -> Result {
+        switch outcome {
+        case let .input(state, request):
+            ConfirmedBilling.inputTrace("handoff.system_parameter.requested type=" + request.inputType)
+            let next = BillingValueInputIntent(state: state, request: request, attachment: attachment)
+            // Do not preassign next.value: that satisfies the required parameter
+            // and suppresses the system's input request. Current content is shown
+            // separately; dynamic keyboard prefill is NOT promised by this API.
+            return .result(value: state, opensIntent: next, dialog: IntentDialog(""))
+        case let .finished(saved): return plain(saved, dialog: try CustomBilling.result(saved))
+        case .cancelled: return plain(try ConfirmedBilling.encode(["status": "cancelled"]), dialog: IntentDialog("已取消，未入账"))
+        }
+    }
+
+    static func start(_ state: String, attachment: IntentFile?,
+                      choose: @escaping ([String], String) async throws -> String) async throws -> Result {
+        let outcome = try await advance(state, attachment: attachment, choose: choose)
+        return try result(outcome, attachment: attachment)
+    }
+}
+
+@available(iOS 16.0, *)
+struct BillingValueInputIntent: AppIntent {
+    static var isDiscoverable: Bool = false
+    static var title: LocalizedStringResource = "修改账单内容（内部）"
+    static var description: LocalizedStringResource = "系统收集输入后继续同一笔账单；金额请用十进制文字填写。不是额外添加到快捷指令的动作。"
+    static var openAppWhenRun = false
+    @Parameter(title: "本次编辑状态", inputConnectionBehavior: .never) var state: String
+    @Parameter(title: "输入项目", inputConnectionBehavior: .never) var field: String
+    @Parameter(title: "当前内容", inputConnectionBehavior: .never) var currentValue: String
+    @Parameter(title: "新内容", inputOptions: String.IntentInputOptions(multiline: true), requestValueDialog: "请输入修改后的备注、金额或日期", inputConnectionBehavior: .never) var value: String
+    @Parameter(title: "附带图片", inputConnectionBehavior: .never) var attachment: IntentFile?
+    @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("\(\.$field)：\(\.$value)") { \.$currentValue }
+    }
+    init() {}
+    init(state: String, request: BillingInputRequest, attachment: IntentFile?) {
+        self.state = state
+        self.field = request.prompt
+        self.currentValue = request.currentValue
+        self.attachment = attachment
+        // value deliberately remains unset. The system resolves it before perform.
+    }
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog & OpensIntent {
+        _ = try BillingHandoff.inputRequest(state)
+        ConfirmedBilling.inputTrace("handoff.system_parameter.received")
+        let outcome = try await BillingHandoff.advance(state, response: value, hasResponse: true, attachment: attachment, choose: { values, prompt in
+            try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
+        })
+        return try BillingHandoff.result(outcome, attachment: attachment)
     }
 }
 
@@ -1108,16 +1216,13 @@ struct CustomExpenseBillingIntent: AppIntent {
     static var parameterSummary: some ParameterSummary {
         Summary("自定义支出账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$account; \.$tags; \.$excluded; \.$attachment; \.$templateMode }
     }
-    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog & OpensIntent {
         let draft = try await CustomBilling.draft(type: "expense", ledger: ledger, category: category, amount: amount, date: date, note: note, account: account, destination: nil, tags: tags, excluded: excluded)
-        if templateMode { return .result(value: try BillingStepFlow.start(draft), dialog: IntentDialog("")) }
-        let editor = ConfirmedBillingEditor(draft: draft, choose: { values, prompt in
+        if templateMode { return BillingHandoff.plain(try BillingStepFlow.start(draft), dialog: IntentDialog("")) }
+        let state = try BillingStepFlow.start(draft)
+        return try await BillingHandoff.start(state, attachment: attachment, choose: { values, prompt in
             try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
-        }, input: { prompt in textValue = ""
-            return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
-        let submission = try await editor.runEditor()
-        let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission), attachment: attachment)
-        return .result(value: saved, dialog: try CustomBilling.result(saved))
+        })
     }
 }
 
@@ -1143,16 +1248,13 @@ struct CustomIncomeBillingIntent: AppIntent {
     static var parameterSummary: some ParameterSummary {
         Summary("自定义收入账单") { \.$ledger; \.$category; \.$amount; \.$date; \.$note; \.$account; \.$tags; \.$attachment; \.$templateMode }
     }
-    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog & OpensIntent {
         let draft = try await CustomBilling.draft(type: "income", ledger: ledger, category: category, amount: amount, date: date, note: note, account: account, destination: nil, tags: tags, excluded: false)
-        if templateMode { return .result(value: try BillingStepFlow.start(draft), dialog: IntentDialog("")) }
-        let editor = ConfirmedBillingEditor(draft: draft, choose: { values, prompt in
+        if templateMode { return BillingHandoff.plain(try BillingStepFlow.start(draft), dialog: IntentDialog("")) }
+        let state = try BillingStepFlow.start(draft)
+        return try await BillingHandoff.start(state, attachment: attachment, choose: { values, prompt in
             try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
-        }, input: { prompt in textValue = ""
-            return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
-        let submission = try await editor.runEditor()
-        let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission), attachment: attachment)
-        return .result(value: saved, dialog: try CustomBilling.result(saved))
+        })
     }
 }
 
@@ -1178,16 +1280,13 @@ struct CustomTransferBillingIntent: AppIntent {
     static var parameterSummary: some ParameterSummary {
         Summary("自定义转账账单") { \.$ledger; \.$amount; \.$date; \.$note; \.$account; \.$destination; \.$tags; \.$attachment; \.$templateMode }
     }
-    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog & OpensIntent {
         let draft = try await CustomBilling.draft(type: "transfer", ledger: ledger, category: nil, amount: amount, date: date, note: note, account: account, destination: destination, tags: tags, excluded: false)
-        if templateMode { return .result(value: try BillingStepFlow.start(draft), dialog: IntentDialog("")) }
-        let editor = ConfirmedBillingEditor(draft: draft, choose: { values, prompt in
+        if templateMode { return BillingHandoff.plain(try BillingStepFlow.start(draft), dialog: IntentDialog("")) }
+        let state = try BillingStepFlow.start(draft)
+        return try await BillingHandoff.start(state, attachment: attachment, choose: { values, prompt in
             try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
-        }, input: { prompt in textValue = ""
-            return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
-        let submission = try await editor.runEditor()
-        let saved = try await ConfirmedBilling.commit(ConfirmedBilling.decode(submission), attachment: attachment)
-        return .result(value: saved, dialog: try CustomBilling.result(saved))
+        })
     }
 }
 
@@ -1266,6 +1365,7 @@ enum RecognitionBillingFlow {
                     configuration: [String: Any],
                     attachment: IntentFile? = nil,
                     templateMode: Bool = false,
+                    independentInput: Bool = false,
                     showIncompleteDraft: Bool = false,
                     choose: @escaping ([String], String) async throws -> String,
                     input: @escaping (String) async throws -> String,
@@ -1306,6 +1406,7 @@ enum RecognitionBillingFlow {
                 "ledgerId": ledgerId, "currency": currency, "candidates": [candidate]]
         }
         if templateMode { return try BillingStepFlow.start(ConfirmedBilling.encode(draft)) }
+        if independentInput { return try BillingStepFlow.start(ConfirmedBilling.encode(draft), showIncompleteDraft: showIncompleteDraft) }
         let editor = ConfirmedBillingEditor(draft: try ConfirmedBilling.encode(draft), choose: choose, input: input, showIncompleteDraft: showIncompleteDraft, call: call)
         // Cancellation exits before commit. Existing atomic/idempotent store is reused.
         let submission = try await editor.runEditor()
@@ -1330,13 +1431,15 @@ struct ImageConfirmBillingIntent: AppIntent {
     static var parameterSummary: some ParameterSummary {
         Summary("识别\(\.$image)并确认记账") { \.$ledger; \.$tags; \.$clearTags; \.$excluded; \.$attachment; \.$templateMode }
     }
-    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog & OpensIntent {
         let config = RecognitionBillingFlow.configuration(ledger: ledger, tags: tags, clearTags: clearTags, excluded: excluded)
-        let saved = try await RecognitionBillingFlow.run(image: image, configuration: config, attachment: attachment, templateMode: templateMode, choose: { values, prompt in
+        let saved = try await RecognitionBillingFlow.run(image: image, configuration: config, attachment: attachment, templateMode: templateMode, independentInput: !templateMode, choose: { values, prompt in
             try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
-        }, input: { prompt in textValue = ""
-            return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
-        return .result(value: saved, dialog: try (templateMode ? IntentDialog("") : CustomBilling.result(saved)))
+        }, input: { _ in throw ShortcutBillingError(message: "普通入口必须交给独立系统输入") })
+        if templateMode { return BillingHandoff.plain(saved, dialog: IntentDialog("")) }
+        return try await BillingHandoff.start(saved, attachment: attachment, choose: { values, prompt in
+            try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
+        })
     }
 }
 
@@ -1352,7 +1455,7 @@ enum TextBillingEntry {
     }
 
     static func run(text: String, configuration: [String: Any],
-                    attachment: IntentFile? = nil, legacyTemplateMode: Bool = false,
+                    attachment: IntentFile? = nil, legacyTemplateMode: Bool = false, independentInput: Bool = false,
                     choose: @escaping ([String], String) async throws -> String,
                     input: @escaping (String) async throws -> String,
                     call: @escaping ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call,
@@ -1374,7 +1477,7 @@ enum TextBillingEntry {
             }
         }
         return try await RecognitionBillingFlow.run(text: text, configuration: configuration,
-            attachment: attachment, templateMode: false, showIncompleteDraft: true,
+            attachment: attachment, templateMode: false, independentInput: independentInput, showIncompleteDraft: true,
             choose: choose, input: input, call: visibleCall, commit: commit)
     }
 }
@@ -1420,17 +1523,18 @@ struct TextConfirmBillingIntent: AppIntent {
     static var parameterSummary: some ParameterSummary {
         Summary("识别\(\.$text)并确认记账") { \.$ledger; \.$tags; \.$clearTags; \.$excluded; \.$attachment }
     }
-    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog & OpensIntent {
         let source = TextBillingEntry.source(text)
         guard !source.isEmpty else {
             throw $text.needsValueError("请输入记账文字，或连接截图提取的文本")
         }
         let config = RecognitionBillingFlow.configuration(ledger: ledger, tags: tags, clearTags: clearTags, excluded: excluded)
-        let saved = try await TextBillingEntry.run(text: source, configuration: config, attachment: attachment, legacyTemplateMode: templateMode, choose: { values, prompt in
+        let saved = try await TextBillingEntry.run(text: source, configuration: config, attachment: attachment, legacyTemplateMode: templateMode, independentInput: true, choose: { values, prompt in
             try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
-        }, input: { prompt in textValue = ""
-            return try await ConfirmedBilling.requestText($textValue, prompt: prompt) })
-        return .result(value: saved, dialog: try CustomBilling.result(saved))
+        }, input: { _ in throw ShortcutBillingError(message: "普通入口必须交给独立系统输入") })
+        return try await BillingHandoff.start(saved, attachment: attachment, choose: { values, prompt in
+            try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
+        })
     }
 }
 
