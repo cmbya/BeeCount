@@ -1003,9 +1003,35 @@ final class ConfirmedBillingEditor {
                     if !didSplit && entries.count == 1 { entries[0]["amountMinor"] = amount }
                 } else { _ = try await choose(["返回修改"], "请输入有效正金额") }
             case "拆分或新增明细":
-                guard !didSplit || entries.count < 100 else { continue }
-                let remaining = didSplit ? total - entries.reduce(0) { $0 + ($1["amountMinor"] as? Int ?? 0) } : total
-                guard remaining > 0 else { continue }
+                if didSplit && entries.count >= 100 {
+                    _ = try await choose(["返回账单"], "最多支持 100 笔明细，请先删除已有明细，再新增")
+                    continue
+                }
+                let remaining = didSplit ? total - used : total
+                if remaining <= 0 {
+                    guard didSplit, !entries.isEmpty, total > 0 else {
+                        _ = try await choose(["返回账单"], "请先填写有效的原付款金额，再拆分明细")
+                        continue
+                    }
+                    // A full allocation isn't an inert Add button. Go straight
+                    // to existing detail selection without another confirmation.
+                    let labels = entries.enumerated().map { "第 " + String($0.offset + 1) + " 笔 " + ConfirmedBilling.money($0.element["amountMinor"] as? Int ?? 0, digits: digits) }
+                    let prompt = remaining == 0
+                        ? "金额已分配完，请选择一笔明细调小金额，腾出余额后可继续新增"
+                        : "明细已超额 " + ConfirmedBilling.money(-remaining, digits: digits) + "，请选择一笔明细调整金额"
+                    let selected = try await choose(labels + ["返回"], prompt)
+                    guard let index = labels.firstIndex(of: selected) else { continue }
+                    let maximum = total - used + (entries[index]["amountMinor"] as? Int ?? 0)
+                    guard maximum > 0 else {
+                        _ = try await choose(["返回账单"], "其他明细已用完或超过总额，请先删除其他明细或修改原付款金额")
+                        continue
+                    }
+                    do {
+                        if let entry = try await edit(entries[index], categories: categories, tags: tags, digits: digits, type: type, maximum: maximum) { entries[index] = entry }
+                    } catch let pending as BillingInputSuspension { throw pending }
+                    catch is CancellationError { continue }
+                    continue
+                }
                 // Preserve edited values, not the original AI candidate.
                 if !didSplit, let first = entries.first { splitTemplate = first }
                 var initial = splitTemplate

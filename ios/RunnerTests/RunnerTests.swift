@@ -1195,4 +1195,162 @@ class RunnerTests: XCTestCase {
     }
   }
 
+  @available(iOS 16.0, *)
+  @MainActor
+  func testFullAllocationAddSelectsExistingDetailThenContinuesSplitThroughHandoff() async throws {
+    var choices = ["拆分或新增明细", "完成此笔", "拆分或新增明细", "第 1 笔 300.00", "金额", "备注", "完成此笔",
+      "拆分或新增明细", "完成此笔", "确认提交"]
+    var fullSelectionPrompts = 0
+    var commits = 0
+    let choose: ([String], String) async throws -> String = { values, prompt in
+      XCTAssertFalse(values.contains("开始拆分"))
+      if prompt.contains("金额已分配完") {
+        fullSelectionPrompts += 1
+        XCTAssertEqual(values, ["第 1 笔 300.00", "返回"])
+      }
+      let action = self.menuValue(choices.removeFirst(), values)
+      XCTAssertTrue(values.contains(action), action); return action
+    }
+    let call: ([String: Any]) async throws -> [String: Any] = { request in
+      XCTAssertNotEqual(request["operation"] as? String, "recognize")
+      XCTAssertNotEqual(request["operation"] as? String, "commit")
+      return request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions()
+    }
+    let commit: ([String: Any], IntentFile?) async throws -> String = { submission, _ in
+      commits += 1
+      XCTAssertTrue(choices.isEmpty)
+      let entries = try XCTUnwrap(submission["entries"] as? [[String: Any]])
+      XCTAssertEqual(entries.compactMap { $0["amountMinor"] as? Int }, [8000, 22000])
+      XCTAssertEqual(entries[0]["note"] as? String, "第一笔")
+      XCTAssertEqual(entries[1]["note"] as? String, "原文")
+      XCTAssertEqual(entries[0]["categoryId"] as? Int, 10)
+      XCTAssertEqual(entries[0]["tagIds"] as? [Int], [3])
+      return "saved"
+    }
+    var outcome = try await BillingHandoff.advance(BillingStepFlow.start(editorDraft()), choose: choose, call: call, commit: commit)
+    for (index, answer) in ["80", "第一笔"].enumerated() {
+      guard case let .input(state, request) = outcome else { XCTFail("Expected detail input"); return }
+      XCTAssertEqual(request.currentValue, index == 0 ? "300.00" : "原文")
+      XCTAssertEqual(commits, 0)
+      outcome = try await BillingHandoff.advance(state, response: answer, hasResponse: true, choose: choose, call: call, commit: commit)
+    }
+    guard case .finished = outcome else { XCTFail("Expected confirmed save"); return }
+    XCTAssertEqual(commits, 1)
+    XCTAssertEqual(fullSelectionPrompts, 1, "Historical selector must not redisplay after input")
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testFullAllocationSelectorReturnAndFieldCancelPreserveOriginalDetail() async throws {
+    for cancelField in [false, true] {
+      var choices = ["拆分或新增明细", "完成此笔", "拆分或新增明细"] +
+        (cancelField ? ["第 1 笔 300.00", "备注", "取消本次字段修改"] : ["返回"]) + ["确认提交"]
+      var sawSelector = false
+      let editor = ConfirmedBillingEditor(draft: try editorDraft(), choose: { values, prompt in
+        if prompt.contains("金额已分配完") { sawSelector = true }
+        let action = self.menuValue(choices.removeFirst(), values)
+        XCTAssertTrue(values.contains(action)); return action
+      }, input: { _ in
+        XCTAssertTrue(cancelField)
+        return "不应保留的编辑"
+      }, call: { request in request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions() })
+      let submission = try ConfirmedBilling.decode(await editor.runEditor())
+      let entries = try XCTUnwrap(submission["entries"] as? [[String: Any]])
+      XCTAssertTrue(sawSelector)
+      XCTAssertEqual(entries.count, 1)
+      XCTAssertEqual(entries[0]["amountMinor"] as? Int, 30000)
+      XCTAssertEqual(entries[0]["note"] as? String, "原文")
+      XCTAssertTrue(choices.isEmpty)
+    }
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testOverallocatedAddSelectsExistingDetailAndUsesCurrentTotalLimit() async throws {
+    var choices = ["拆分或新增明细", "完成此笔", "修改原付款金额", "拆分或新增明细", "第 1 笔 300.00",
+      "金额", "完成此笔", "拆分或新增明细", "完成此笔", "确认提交"]
+    var inputs = ["250", "200"]
+    var sawExcessSelector = false
+    let editor = ConfirmedBillingEditor(draft: try editorDraft(), choose: { values, prompt in
+      if prompt.contains("明细已超额 50.00") { sawExcessSelector = true }
+      let action = self.menuValue(choices.removeFirst(), values)
+      XCTAssertTrue(values.contains(action)); return action
+    }, input: { _ in inputs.removeFirst() }, call: { request in request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions() })
+    let submission = try ConfirmedBilling.decode(await editor.runEditor())
+    let entries = try XCTUnwrap(submission["entries"] as? [[String: Any]])
+    XCTAssertTrue(sawExcessSelector)
+    XCTAssertEqual(submission["originalAmountMinor"] as? Int, 25000)
+    XCTAssertEqual(entries.compactMap { $0["amountMinor"] as? Int }, [20000, 5000])
+    XCTAssertTrue(choices.isEmpty)
+    XCTAssertTrue(inputs.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testSplitEntryLimitGivesFeedbackWithoutCreatingExtraDetail() async throws {
+    var choices: [String] = []
+    for _ in 0..<100 { choices += ["拆分或新增明细", "金额", "完成此笔"] }
+    choices += ["拆分或新增明细", "返回账单", "确认提交", "返回修改", "取消提交"]
+    var inputs = 0
+    var sawLimit = false
+    var sawUnallocated = false
+    let editor = ConfirmedBillingEditor(draft: try editorDraft(), choose: { values, prompt in
+      if prompt.contains("最多支持 100 笔明细") { sawLimit = true; XCTAssertEqual(values, ["返回账单"]) }
+      if prompt.contains("金额尚未分配完") { sawUnallocated = true }
+      let action = self.menuValue(choices.removeFirst(), values)
+      XCTAssertTrue(values.contains(action)); return action
+    }, input: { _ in inputs += 1; return "1" }, call: { request in
+      XCTAssertEqual(request["operation"] as? String, "options", "Unallocated draft must not validate/save")
+      return self.editorOptions()
+    })
+    do { _ = try await editor.runEditor(); XCTFail("Expected cancel") }
+    catch { XCTAssertTrue(sawLimit); XCTAssertTrue(sawUnallocated) }
+    XCTAssertEqual(inputs, 100)
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testMissingOriginalAmountCannotSilentlyOpenSplitOrSave() async throws {
+    var source = try ConfirmedBilling.decode(editorDraft())
+    var candidates = try XCTUnwrap(source["candidates"] as? [[String: Any]])
+    candidates[0].removeValue(forKey: "amountMinor")
+    source["candidates"] = candidates
+    var choices = ["拆分或新增明细", "返回账单", "取消提交"]
+    var sawMissingAmount = false
+    let editor = ConfirmedBillingEditor(draft: try ConfirmedBilling.encode(source), choose: { values, prompt in
+      if prompt.contains("请先填写有效的原付款金额") { sawMissingAmount = true }
+      let action = self.menuValue(choices.removeFirst(), values)
+      XCTAssertTrue(values.contains(action)); return action
+    }, input: { _ in XCTFail("Must show missing amount message before input"); return "" }, showIncompleteDraft: true, call: { request in
+      XCTAssertEqual(request["operation"] as? String, "options")
+      return self.editorOptions()
+    })
+    do { _ = try await editor.runEditor(); XCTFail("Expected cancel") }
+    catch { XCTAssertTrue(sawMissingAmount) }
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testOverallocatedDetailWithoutPositiveRoomExplainsAndDoesNotDropOtherEntries() async throws {
+    var choices = ["拆分或新增明细", "金额", "完成此笔", "拆分或新增明细", "完成此笔", "修改原付款金额",
+      "拆分或新增明细", "第 1 笔 80.00", "返回账单", "修改原付款金额", "确认提交"]
+    var inputs = ["80", "50", "300"]
+    var sawNoRoom = false
+    let editor = ConfirmedBillingEditor(draft: try editorDraft(), choose: { values, prompt in
+      if prompt.contains("其他明细已用完或超过总额") { sawNoRoom = true; XCTAssertEqual(values, ["返回账单"]) }
+      let action = self.menuValue(choices.removeFirst(), values)
+      XCTAssertTrue(values.contains(action)); return action
+    }, input: { _ in inputs.removeFirst() }, call: { request in request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions() })
+    let submission = try ConfirmedBilling.decode(await editor.runEditor())
+    let entries = try XCTUnwrap(submission["entries"] as? [[String: Any]])
+    XCTAssertTrue(sawNoRoom)
+    XCTAssertEqual(entries.compactMap { $0["amountMinor"] as? Int }, [8000, 22000])
+    XCTAssertEqual(submission["originalAmountMinor"] as? Int, 30000)
+    XCTAssertTrue(inputs.isEmpty)
+    XCTAssertTrue(choices.isEmpty)
+  }
+
 }
