@@ -174,13 +174,41 @@ private struct ShortcutBillingError: LocalizedError {
 @available(iOS 16.0, *)
 @MainActor
 enum ConfirmedBilling {
-    static func requestText(_ parameter: IntentParameter<String>, prompt: String) async throws -> String {
+    // Diagnostic transport deliberately preserves existing behavior. A simulated
+    // input response cannot establish why the Shortcuts host dismisses its UI.
+    static func tracedInput(_ read: () async throws -> String,
+                            trace: (String) -> Void) async throws -> String {
+        trace("request.started")
         do {
-            return try await parameter.requestValue(IntentDialog(stringLiteral: prompt))
+            let value = try await read()
+            trace("request.returned")
+            return value
+        } catch {
+            let kind = error is CancellationError ? "cancelled" : error is AppIntentError ? "framework" : "error"
+            trace("request." + kind + " code=" + String((error as NSError).code))
+            throw error
+        }
+    }
+
+    static func inputTrace(_ event: String) {
+        // Only fixed stage labels/codes, never prompts, notes, amounts or errors
+        // descriptions. NSLog also helps when the Flutter log channel is suspended.
+        let message = "[ShortcutInput] " + event
+        NSLog("%@", message)
+        LoggerPlugin.info(tag: "ShortcutInput", message: event)
+    }
+
+    static func requestText(_ parameter: IntentParameter<String>, prompt: String) async throws -> String {
+        let token = UUID().uuidString
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+        inputTrace(token + " build=" + build + " ios=" + UIDevice.current.systemVersion + " host.state=" + String(UIApplication.shared.applicationState.rawValue) + " task.cancelled=" + String(Task.isCancelled))
+        do {
+            return try await tracedInput({ try await parameter.requestValue(IntentDialog(stringLiteral: prompt)) },
+                trace: { inputTrace(token + " " + $0) })
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            // Do not silently swallow an unsupported system input request.
+            // Kept unchanged until a device trace establishes the failure mode.
             throw ShortcutBillingError(message: "系统输入未完成，已保留原字段，请返回账单重试。" + error.localizedDescription)
         }
     }
@@ -652,7 +680,9 @@ final class ConfirmedBillingEditor {
     }
     private func fields(_ actions: [String], title: String, values: [String: String]) async throws -> String {
         let labels = actions.map { action in values[action].map { action + "：" + $0 } ?? action }
+        ConfirmedBilling.inputTrace("editor.menu.requested")
         let selected = try await choose(labels, title)
+        ConfirmedBilling.inputTrace("editor.menu.returned")
         return labels.firstIndex(of: selected).map { actions[$0] } ?? selected
     }
     @MainActor private func edit(_ initial: [String: Any], categories: [[String: Any]], tags: [[String: Any]], digits: Int, type: String, maximum: Int? = nil) async throws -> [String: Any]? {
@@ -684,11 +714,17 @@ final class ConfirmedBillingEditor {
                 else { _ = try await choose(["返回修改"], "金额无效：须为正数、符合账本精度，且不能超过可分配金额") }
             case "分类": entry["categoryId"] = try await pick(categories, "选择分类")
             case "备注":
+                ConfirmedBilling.inputTrace("detail.note.selected")
                 let old = entry["note"] as? String ?? ""
-                do { entry["note"] = ConfirmedBilling.updatedNote(old, value: try await ask("修改备注（可留空）；原备注：" + old, current: old)) }
-                catch let pending as BillingInputSuspension { throw pending }
-                catch is CancellationError { continue }
-                catch { _ = try await choose(["返回账单"], error.localizedDescription) }
+                do {
+                    entry["note"] = ConfirmedBilling.updatedNote(old, value: try await ask("修改备注（可留空）；原备注：" + old, current: old))
+                    ConfirmedBilling.inputTrace("detail.note.applied")
+                } catch let pending as BillingInputSuspension { throw pending }
+                catch is CancellationError { ConfirmedBilling.inputTrace("detail.note.cancelled_returning"); continue }
+                catch {
+                    ConfirmedBilling.inputTrace("detail.note.error_returning")
+                    _ = try await choose(["返回账单"], error.localizedDescription)
+                }
             case "标签": entry["tagIds"] = ConfirmedBilling.nextTag(entry["tagIds"] as? [Int] ?? [], tags: tags)
             case "预算标记": entry["excludeFromBudget"] = !(entry["excludeFromBudget"] as? Bool ?? false)
             default: return nil
@@ -780,11 +816,17 @@ final class ConfirmedBillingEditor {
             switch action {
             case "分类": entries[0]["categoryId"] = try await pick(categories, "选择分类")
             case "备注":
+                ConfirmedBilling.inputTrace("bill.note.selected")
                 let old = entries[0]["note"] as? String ?? ""
-                do { entries[0]["note"] = ConfirmedBilling.updatedNote(old, value: try await ask("修改备注（可留空）；原备注：" + old, current: old)) }
-                catch let pending as BillingInputSuspension { throw pending }
-                catch is CancellationError { continue }
-                catch { _ = try await choose(["返回账单"], error.localizedDescription) }
+                do {
+                    entries[0]["note"] = ConfirmedBilling.updatedNote(old, value: try await ask("修改备注（可留空）；原备注：" + old, current: old))
+                    ConfirmedBilling.inputTrace("bill.note.applied")
+                } catch let pending as BillingInputSuspension { throw pending }
+                catch is CancellationError { ConfirmedBilling.inputTrace("bill.note.cancelled_returning"); continue }
+                catch {
+                    ConfirmedBilling.inputTrace("bill.note.error_returning")
+                    _ = try await choose(["返回账单"], error.localizedDescription)
+                }
             case "标签": entries[0]["tagIds"] = ConfirmedBilling.nextTag(entries[0]["tagIds"] as? [Int] ?? [], tags: tags)
             case "不计预算": entries[0]["excludeFromBudget"] = !(entries[0]["excludeFromBudget"] as? Bool ?? false)
             case "取消整次记账": throw ShortcutBillingError(message: "已取消，未入账")

@@ -961,4 +961,62 @@ class RunnerTests: XCTestCase {
     XCTAssertTrue(choices.isEmpty)
   }
 
+  // Diagnostic seam tests verify stage reporting/error identity, not the
+  // Shortcuts host UI. They must not be reported as keyboard acceptance tests.
+  @available(iOS 16.0, *)
+  @MainActor
+  func testInputTraceReportsReturnedEmptyStringWithoutLoggingNote() async throws {
+    var events: [String] = []
+    let value = try await ConfirmedBilling.tracedInput({ "" }, trace: { events.append($0) })
+    XCTAssertEqual(value, "")
+    XCTAssertEqual(events, ["request.started", "request.returned"])
+    events = []
+    let privateValue = try await ConfirmedBilling.tracedInput({ "private bill note" }, trace: { events.append($0) })
+    XCTAssertEqual(privateValue, "private bill note")
+    XCTAssertFalse(events.joined().contains("private"))
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testInputTraceReportsCancellationAndRethrows() async throws {
+    var events: [String] = []
+    do {
+      _ = try await ConfirmedBilling.tracedInput({ throw CancellationError() }, trace: { events.append($0) })
+      XCTFail("Cancellation must not become empty note or success")
+    } catch { XCTAssertTrue(error is CancellationError) }
+    XCTAssertEqual(events.first, "request.started")
+    XCTAssertTrue(events.last?.hasPrefix("request.cancelled code=") == true)
+    XCTAssertEqual(events.count, 2)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testInputTraceReportsFrameworkErrorWithoutReplacingIt() async throws {
+    let intent = TextConfirmBillingIntent()
+    let original = intent.$text.needsValueError("private prompt")
+    var events: [String] = []
+    do {
+      _ = try await ConfirmedBilling.tracedInput({ throw original }, trace: { events.append($0) })
+      XCTFail("Framework error must propagate through diagnostic seam")
+    } catch { XCTAssertTrue(error is AppIntentError) }
+    XCTAssertTrue(events.last?.hasPrefix("request.framework code=") == true)
+    XCTAssertFalse(events.joined().contains("private"))
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testInputTraceReportsErrorCodeWithoutLoggingErrorDescription() async throws {
+    let original = NSError(domain: "TestInput", code: 42, userInfo: [NSLocalizedDescriptionKey: "private note content"])
+    var events: [String] = []
+    do {
+      _ = try await ConfirmedBilling.tracedInput({ throw original }, trace: { events.append($0) })
+      XCTFail("Error must propagate through diagnostic seam")
+    } catch {
+      XCTAssertEqual((error as NSError).domain, original.domain)
+      XCTAssertEqual((error as NSError).code, 42)
+    }
+    XCTAssertEqual(events, ["request.started", "request.error code=42"])
+    XCTAssertFalse(events.joined().contains("private"))
+  }
+
 }
