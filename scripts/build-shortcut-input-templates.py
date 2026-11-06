@@ -10,7 +10,7 @@ from uuid import uuid5, NAMESPACE_URL
 
 MODES = {
     'image': ('图片记账', 'ImageConfirmBillingIntent'),
-    'text': ('文字记账', 'TextConfirmBillingIntent'),
+    'text': ('文字记账', 'TextBillingTemplateStartIntent'),
     'expense': ('自定义支出账单', 'CustomExpenseBillingIntent'),
     'income': ('自定义收入账单', 'CustomIncomeBillingIntent'),
     'transfer': ('自定义转账账单', 'CustomTransferBillingIntent'),
@@ -58,7 +58,8 @@ def build(mode, bundle='com.tntlikely.beecount', team='0000000000'):
         'BeeCount 系统询问输入模板（未签名、待真机验证）。备注和金额点击后预填编辑，取消输入结束且不入账。'
         '必须安装支持模板模式的新版 App。首动作预设账本/账户/金额可自行配置。'
         '附带图片请在最后保存动作连接截图变量，留空不保存附件。')]
-    params = {'templateMode': True}
+    # Ordinary text billing always reviews; draft-only transport has its own action.
+    params = {} if mode == 'text' else {'templateMode': True}
     if mode == 'image':
         params['image'] = token({'Type': 'ExtensionInput'})
     elif mode == 'text':

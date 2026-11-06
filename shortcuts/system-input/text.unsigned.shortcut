@@ -46,7 +46,7 @@
 		</dict>
 		<dict>
 			<key>WFWorkflowActionIdentifier</key>
-			<string>com.tntlikely.beecount.TextConfirmBillingIntent</string>
+			<string>com.tntlikely.beecount.TextBillingTemplateStartIntent</string>
 			<key>WFWorkflowActionParameters</key>
 			<dict>
 				<key>UUID</key>
@@ -54,7 +54,7 @@
 				<key>AppIntentDescriptor</key>
 				<dict>
 					<key>AppIntentIdentifier</key>
-					<string>TextConfirmBillingIntent</string>
+					<string>TextBillingTemplateStartIntent</string>
 					<key>BundleIdentifier</key>
 					<string>com.tntlikely.beecount</string>
 					<key>Name</key>
@@ -62,8 +62,6 @@
 					<key>TeamIdentifier</key>
 					<string>0000000000</string>
 				</dict>
-				<key>templateMode</key>
-				<true/>
 				<key>text</key>
 				<dict>
 					<key>Value</key>

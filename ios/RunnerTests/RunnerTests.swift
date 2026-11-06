@@ -89,6 +89,7 @@ class RunnerTests: XCTestCase {
     XCTAssertFalse(BillingOptionsIntent.isDiscoverable)
     XCTAssertFalse(ImageBillingDraftIntent.isDiscoverable)
     XCTAssertFalse(TextBillingDraftIntent.isDiscoverable)
+    XCTAssertFalse(TextBillingTemplateStartIntent.isDiscoverable)
     XCTAssertFalse(EditBillingDraftIntent.isDiscoverable)
     XCTAssertFalse(CommitConfirmedBillingIntent.isDiscoverable)
     XCTAssertTrue(CustomExpenseBillingIntent.isDiscoverable)
@@ -773,6 +774,191 @@ class RunnerTests: XCTestCase {
       XCTAssertEqual(try ConfirmedBilling.decode(final)["status"] as? String, "confirmed")
       XCTAssertTrue(choices.isEmpty)
     }
+  }
+
+  // Text entry regressions: use the same orchestration as the public action.
+  @available(iOS 16.0, *)
+  @MainActor
+  func testTextEntryLegacyTemplateFlagStillReviewsAndCommitsOnlyAfterConfirmation() async throws {
+    for oldFlag in [false, true] {
+      var choices = ["确认提交"]
+      var sawReview = false
+      var recognitions = 0
+      var commits = 0
+      let result = try await TextBillingEntry.run(text: "  午饭 300 元  ", configuration: [:], legacyTemplateMode: oldFlag, choose: { values, prompt in
+        XCTAssertEqual(prompt, "确认支出信息")
+        sawReview = true
+        XCTAssertTrue(values.contains("备注：原文"))
+        return self.menuValue(choices.removeFirst(), values)
+      }, input: { _ in XCTFail("Complete text bill must not request input before review"); return "" }, call: { request in
+        switch request["operation"] as? String {
+        case "recognize":
+          recognitions += 1
+          XCTAssertEqual(request["mode"] as? String, "text")
+          XCTAssertEqual(request["text"] as? String, "午饭 300 元")
+          XCTAssertEqual(request["ledgerId"] as? Int, 1)
+          XCTAssertNil(request["imagePath"])
+          return try ConfirmedBilling.decode(self.editorDraft())
+        case "validate": return ["status": "valid"]
+        default: return self.editorOptions()
+        }
+      }, commit: { submission, attachment in
+        XCTAssertTrue(sawReview)
+        XCTAssertTrue(choices.isEmpty)
+        XCTAssertEqual(submission["confirmed"] as? Bool, true)
+        XCTAssertNil(attachment)
+        commits += 1
+        return "saved"
+      })
+      XCTAssertEqual(result, "saved")
+      XCTAssertEqual(recognitions, 1)
+      XCTAssertEqual(commits, 1)
+    }
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testTextEntryMissingFieldsShowsReviewBeforeAnyInputAndCanCancel() async throws {
+    var sawReview = false
+    do {
+      _ = try await TextBillingEntry.run(text: "付款信息没有明确金额", configuration: [:], choose: { values, prompt in
+        XCTAssertEqual(prompt, "确认支出信息")
+        XCTAssertTrue(values.contains("金额：待填写"))
+        XCTAssertTrue(values.contains("账户：待选择"))
+        sawReview = true
+        return "取消提交"
+      }, input: { _ in XCTFail("Must show review before missing amount input"); return "" }, call: { request in
+        if request["operation"] as? String == "recognize" {
+          return ["status": "draft", "ledgerId": 1, "currency": "CNY", "candidates": [["type": "expense", "note": "待核对"]]]
+        }
+        XCTAssertEqual(request["operation"] as? String, "options")
+        return self.editorOptions()
+      }, commit: { _, _ in XCTFail("Cancelled bill cannot commit"); return "" })
+      XCTFail("Expected cancellation")
+    } catch { XCTAssertTrue(sawReview) }
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testTextEntryRecognitionFailureManualFallbackReachesReview() async throws {
+    var sawFailure = false
+    var sawReview = false
+    do {
+      _ = try await TextBillingEntry.run(text: "示例文字", configuration: [:], choose: { values, prompt in
+        if values.contains("人工填写") {
+          sawFailure = true
+          XCTAssertTrue(prompt.contains("识别未完成"))
+          return "人工填写"
+        }
+        XCTAssertTrue(sawFailure)
+        XCTAssertEqual(prompt, "确认支出信息")
+        sawReview = true
+        return "取消提交"
+      }, input: { _ in XCTFail("Fallback must show review before asking for amount"); return "" }, call: { request in
+        if request["operation"] as? String == "recognize" { throw NSError(domain: "test-ai", code: 1) }
+        XCTAssertEqual(request["operation"] as? String, "options")
+        return self.editorOptions()
+      }, commit: { _, _ in XCTFail("No commit before confirmation"); return "" })
+      XCTFail("Expected cancellation")
+    } catch { XCTAssertTrue(sawFailure); XCTAssertTrue(sawReview) }
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testTextEntryOptionsFailureShowsRetryAndDoesNotRepeatAI() async throws {
+    var optionCalls = 0
+    var recognitions = 0
+    var choices = ["重试", "确认提交"]
+    _ = try await TextBillingEntry.run(text: "午饭300元", configuration: [:], choose: { values, prompt in
+      let action = choices.removeFirst()
+      XCTAssertTrue(values.contains(action))
+      if action == "重试" { XCTAssertTrue(prompt.contains("文字记账无法读取账本选项")) }
+      return action
+    }, input: { _ in XCTFail("Must not request text editing"); return "" }, call: { request in
+      switch request["operation"] as? String {
+      case "options":
+        optionCalls += 1
+        if optionCalls == 1 { throw NSError(domain: "test-bridge", code: 1) }
+        return self.editorOptions()
+      case "recognize": recognitions += 1; return try ConfirmedBilling.decode(self.editorDraft())
+      case "validate": return ["status": "valid"]
+      default: XCTFail("Unexpected request"); return [:]
+      }
+    }, commit: { _, _ in "saved" })
+    XCTAssertEqual(recognitions, 1)
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testTextEntryEmptySourceRejectedBeforeBridgeAndAI() async throws {
+    XCTAssertEqual(TextBillingEntry.source(nil), "")
+    XCTAssertEqual(TextBillingEntry.source(" \n \t"), "")
+    var intent = TextConfirmBillingIntent()
+    intent.text = " \n "
+    do {
+      _ = try await intent.perform()
+      XCTFail("Empty source must throw a system parameter request")
+    } catch {
+      XCTAssertTrue(error is AppIntentError)
+    }
+    do {
+      _ = try await TextBillingEntry.run(text: "  ", configuration: [:], choose: { _, _ in XCTFail(); return "" }, input: { _ in XCTFail(); return "" }, call: { _ in XCTFail("Empty input cannot reach bridge"); return [:] }, commit: { _, _ in XCTFail(); return "" })
+      XCTFail("Empty input must not return success")
+    } catch {}
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testTextEntryMissingAccountCannotCommitUntilSelectedAndReconfirmed() async throws {
+    var choices = ["确认提交", "1. 支付宝", "确认提交"]
+    var committed = false
+    _ = try await TextBillingEntry.run(text: "消费300元", configuration: [:], choose: { values, _ in
+      let action = choices.removeFirst()
+      XCTAssertTrue(values.contains(action))
+      XCTAssertFalse(committed)
+      return action
+    }, input: { _ in XCTFail(); return "" }, call: { request in
+      if request["operation"] as? String == "recognize" {
+        var draft = try ConfirmedBilling.decode(self.editorDraft())
+        var candidates = try XCTUnwrap(draft["candidates"] as? [[String: Any]])
+        candidates[0].removeValue(forKey: "accountId")
+        draft["candidates"] = candidates
+        return draft
+      }
+      return request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions()
+    }, commit: { submission, _ in
+      XCTAssertTrue(choices.isEmpty)
+      XCTAssertEqual(submission["accountId"] as? Int, 1)
+      committed = true
+      return "saved"
+    })
+    XCTAssertTrue(committed)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testTextEntryEditorOptionsRetryDoesNotRepeatRecognition() async throws {
+    var optionCalls = 0
+    var recognitions = 0
+    var choices = ["重试", "确认提交"]
+    _ = try await TextBillingEntry.run(text: "示例300元", configuration: [:], choose: { values, _ in
+      let action = choices.removeFirst()
+      XCTAssertTrue(values.contains(action))
+      return action
+    }, input: { _ in XCTFail(); return "" }, call: { request in
+      switch request["operation"] as? String {
+      case "options":
+        optionCalls += 1
+        if optionCalls == 2 { throw NSError(domain: "editor-options", code: 1) }
+        return self.editorOptions()
+      case "recognize": recognitions += 1; return try ConfirmedBilling.decode(self.editorDraft())
+      case "validate": return ["status": "valid"]
+      default: XCTFail(); return [:]
+      }
+    }, commit: { _, _ in "saved" })
+    XCTAssertEqual(recognitions, 1)
+    XCTAssertTrue(choices.isEmpty)
   }
 
 }
