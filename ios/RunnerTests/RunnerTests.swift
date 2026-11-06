@@ -1508,4 +1508,133 @@ class RunnerTests: XCTestCase {
     XCTAssertFalse(ConfirmAIDraftProbeIntent.openAppWhenRun)
   }
 
+  @available(iOS 16.0, *)
+  @MainActor
+  func testSingleBillSystemInputPreservesAllFieldsAndHasNoSplit() async throws {
+    var source = try ConfirmedBilling.decode(editorDraft())
+    var candidate = try XCTUnwrap((source["candidates"] as? [[String: Any]])?.first)
+    candidate["tagIds"] = [3, 4]
+    source["candidates"] = [candidate]
+    var choices = ["不计预算", "备注", "金额", "时间", "备注", "确认提交"]
+    var requests = 0
+    let choose: ([String], String) async throws -> String = { values, _ in
+      if values.contains("确认提交") {
+        XCTAssertFalse(values.contains("拆分或新增明细"))
+        XCTAssertFalse(values.contains("编辑明细"))
+        XCTAssertTrue(values.contains { $0.hasPrefix("账本：") })
+        XCTAssertTrue(values.contains { $0.hasPrefix("收支类型：") })
+      }
+      return self.menuValue(choices.removeFirst(), values)
+    }
+    let call: ([String: Any]) async throws -> [String: Any] = { request in
+      XCTAssertTrue(["options", "validate"].contains(request["operation"] as? String ?? ""), "No AI or commit while editing")
+      if request["operation"] as? String == "validate" { return ["status": "valid"] }
+      requests += 1; return self.editorOptions()
+    }
+    var step = try SingleBillingStep(BillingStepFlow.start(ConfirmedBilling.encode(source), showIncompleteDraft: true, singleOnly: true))
+    step = try await SingleBillingFlow.advance(step, hasResponse: false, text: nil, number: nil, date: nil, choose: choose, call: call)
+    XCTAssertEqual(step.inputType, "text")
+    XCTAssertEqual(step.currentText, "原文")
+    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: "修改后的备注", number: nil, date: nil, choose: choose, call: call)
+    XCTAssertEqual(step.inputType, "number")
+    XCTAssertEqual(step.currentNumber, 300)
+    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: nil, number: 12.34, date: nil, choose: choose, call: call)
+    XCTAssertEqual(step.inputType, "date")
+    let changedDate = try XCTUnwrap(SingleBillingFlow.date("2026-11-06T12:30:00+08:00"))
+    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: nil, number: nil, date: changedDate, choose: choose, call: call)
+    XCTAssertEqual(step.currentText, "修改后的备注", "Second note edit must default to the latest draft text")
+    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: nil, number: nil, date: nil, choose: choose, call: call)
+    XCTAssertEqual(step.status, "confirmed")
+    XCTAssertTrue(choices.isEmpty)
+    XCTAssertGreaterThan(requests, 0)
+    var commits = 0
+    _ = try await SingleBillingFlow.save(step, attachment: nil, commit: { submission, attachment in
+      commits += 1
+      XCTAssertNil(attachment)
+      let entry = try XCTUnwrap((submission["entries"] as? [[String: Any]])?.first)
+      XCTAssertEqual(entry["note"] as? String, "", "An explicit empty answer clears the note")
+      XCTAssertEqual(entry["amountMinor"] as? Int, 1234)
+      XCTAssertEqual(entry["tagIds"] as? [Int], [3, 4], "Do not truncate a multi-tag preset")
+      XCTAssertEqual(entry["excludeFromBudget"] as? Bool, true)
+      XCTAssertEqual(submission["occurredAt"] as? String, "2026-11-06T04:30:00Z")
+      XCTAssertEqual(submission["requestId"] as? String, source["requestId"] as? String)
+      return "saved"
+    })
+    XCTAssertEqual(commits, 1)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testSingleBillCancellationAndUnconfirmedStateNeverSave() async throws {
+    var step = try SingleBillingStep(BillingStepFlow.start(editorDraft(), singleOnly: true))
+    var commits = 0
+    do {
+      _ = try await SingleBillingFlow.save(step, attachment: nil, commit: { _, _ in commits += 1; return "bad" })
+      XCTFail("Editing is not final confirmation")
+    } catch {}
+    step = try await SingleBillingFlow.advance(step, hasResponse: false, text: nil, number: nil, date: nil, choose: { _, _ in
+      "取消提交"
+    }, call: { _ in self.editorOptions() })
+    XCTAssertEqual(step.status, "cancelled")
+    do {
+      _ = try await SingleBillingFlow.save(step, attachment: nil, commit: { _, _ in commits += 1; return "bad" })
+      XCTFail("Cancelled step must not save")
+    } catch {}
+    XCTAssertEqual(commits, 0)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testSingleBillTagSelectionAndClearDoesNotResetOtherFields() async throws {
+    var actions = ["标签", "○ 家庭 [4]", "完成标签选择", "标签", "清空标签", "完成标签选择", "确认提交"]
+    let step = try SingleBillingStep(BillingStepFlow.start(editorDraft(), singleOnly: true))
+    let final = try await SingleBillingFlow.advance(step, hasResponse: false, text: nil, number: nil, date: nil, choose: { values, _ in
+      let action = actions.removeFirst()
+      if action == "标签" && actions.count == 3 { XCTAssertTrue(values.contains("标签：个人、家庭")) }
+      return self.menuValue(action, values)
+    }, call: { request in request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions() })
+    let outer = try ConfirmedBilling.decode(final.state)
+    let payload = try ConfirmedBilling.decode(try XCTUnwrap(outer["submission"] as? String))
+    let entry = try XCTUnwrap((payload["entries"] as? [[String: Any]])?.first)
+    XCTAssertEqual(entry["tagIds"] as? [Int], [])
+    XCTAssertEqual(entry["note"] as? String, "原文")
+    XCTAssertEqual(entry["amountMinor"] as? Int, 30000)
+    XCTAssertEqual(entry["excludeFromBudget"] as? Bool, false)
+    XCTAssertTrue(actions.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testSingleBillNumericInputRejectsExtraPrecisionWithoutLosingOldAmount() async throws {
+    var actions = ["金额", "返回修改", "金额"]
+    let choose: ([String], String) async throws -> String = { values, _ in self.menuValue(actions.removeFirst(), values) }
+    let call: ([String: Any]) async throws -> [String: Any] = { _ in self.editorOptions() }
+    let start = try SingleBillingStep(BillingStepFlow.start(editorDraft(), singleOnly: true))
+    let pending = try await SingleBillingFlow.advance(start, hasResponse: false, text: nil, number: nil, date: nil, choose: choose, call: call)
+    let again = try await SingleBillingFlow.advance(pending, hasResponse: true, text: nil, number: 1.234, date: nil, choose: choose, call: call)
+    XCTAssertEqual(again.currentNumber, 300)
+    XCTAssertEqual(again.inputType, "number")
+    XCTAssertTrue(actions.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testSingleBillDoesNotAcceptOldTemplateOrMultipleEntrySubmission() async throws {
+    let old = try SingleBillingStep(BillingStepFlow.start(editorDraft()))
+    XCTAssertThrowsError(try SingleBillingFlow.checkSingle(old))
+    var submission = try ConfirmedBilling.decode(editorDraft())
+    submission["confirmed"] = true
+    submission["entries"] = [["amountMinor": 100], ["amountMinor": 200]]
+    let invalid = try SingleBillingStep(ConfirmedBilling.encode(["status": "confirmed", "singleOnly": true, "submission": ConfirmedBilling.encode(submission)]))
+    var called = false
+    do {
+      _ = try await SingleBillingFlow.save(invalid, attachment: nil, commit: { _, _ in called = true; return "bad" })
+      XCTFail("Round one can only submit one entry")
+    } catch {}
+    XCTAssertFalse(called)
+    XCTAssertTrue(StartSingleBillingIntent.isDiscoverable)
+    XCTAssertTrue(ContinueSingleBillingIntent.isDiscoverable)
+    XCTAssertTrue(SaveSingleBillingIntent.isDiscoverable)
+  }
+
 }

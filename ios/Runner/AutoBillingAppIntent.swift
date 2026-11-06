@@ -512,7 +512,7 @@ final class BillingStepReplay {
 @available(iOS 16.0, *)
 @MainActor
 enum BillingStepFlow {
-    static func start(_ draft: String, showIncompleteDraft: Bool = false) throws -> String {
+    static func start(_ draft: String, showIncompleteDraft: Bool = false, singleOnly: Bool = false) throws -> String {
         var object = try ConfirmedBilling.decode(draft)
         guard object["status"] as? String == "draft" else { throw ShortcutBillingError(message: "草稿无效") }
         // Fallback time must not change while replaying the same edit session.
@@ -523,7 +523,7 @@ enum BillingStepFlow {
         object["candidates"] = candidates
         object["editorTime"] = now
         if object["requestId"] == nil { object["requestId"] = UUID().uuidString }
-        let state: [String: Any] = ["version": 1, "draft": try ConfirmedBilling.encode(object), "events": [[String: String]](), "showIncompleteDraft": showIncompleteDraft]
+        let state: [String: Any] = ["version": 1, "draft": try ConfirmedBilling.encode(object), "events": [[String: String]](), "showIncompleteDraft": showIncompleteDraft, "singleOnly": singleOnly]
         return try ConfirmedBilling.encode(["status": "editing", "state": ConfirmedBilling.encode(state)])
     }
 
@@ -550,7 +550,7 @@ enum BillingStepFlow {
         }, input: { _ in throw ShortcutBillingError(message: "模板模式不能调用旧系统输入") }, externalInput: { request in
             let key = try ConfirmedBilling.encode(request.payload)
             return try await replay.recorded("input", request: key) { throw BillingInputSuspension(request: request) }
-        }, showIncompleteDraft: state["showIncompleteDraft"] as? Bool ?? false, call: { payload in
+        }, showIncompleteDraft: state["showIncompleteDraft"] as? Bool ?? false, singleOnly: state["singleOnly"] as? Bool ?? false, call: { payload in
             // Replay historical options to restore exact menu identities. Final
             // validation and commit always use live references, never cached success.
             let key = try ConfirmedBilling.encode(payload)
@@ -575,9 +575,9 @@ enum BillingStepFlow {
         do {
             let submission = try await editor.runEditor()
             guard replay.cursor == replay.events.count else { throw ShortcutBillingError(message: "编辑步骤不完整，未入账") }
-            return try ConfirmedBilling.encode(["status": "confirmed", "submission": submission])
+            return try ConfirmedBilling.encode(["status": "confirmed", "submission": submission, "singleOnly": state["singleOnly"] as? Bool ?? false])
         } catch let pending as BillingInputSuspension {
-            let next: [String: Any] = ["version": 1, "draft": draft, "events": replay.events, "showIncompleteDraft": state["showIncompleteDraft"] as? Bool ?? false]
+            let next: [String: Any] = ["version": 1, "draft": draft, "events": replay.events, "showIncompleteDraft": state["showIncompleteDraft"] as? Bool ?? false, "singleOnly": state["singleOnly"] as? Bool ?? false]
             return try ConfirmedBilling.encode(["status": "input", "state": ConfirmedBilling.encode(next), "input": pending.request.payload])
         } catch is CancellationError {
             return try ConfirmedBilling.encode(["status": "cancelled"])
@@ -763,16 +763,19 @@ final class ConfirmedBillingEditor {
     let call: ([String: Any]) async throws -> [String: Any]
     let externalInput: ((BillingInputRequest) async throws -> String)?
     let showIncompleteDraft: Bool
+    let singleOnly: Bool
 
     init(draft: String,
          choose: @escaping ([String], String) async throws -> String,
          input: @escaping (String) async throws -> String,
          externalInput: ((BillingInputRequest) async throws -> String)? = nil,
          showIncompleteDraft: Bool = false,
+         singleOnly: Bool = false,
          call: @escaping ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call) {
         self.draft = draft; self.choose = choose; self.input = input; self.call = call
         self.externalInput = externalInput
         self.showIncompleteDraft = showIncompleteDraft
+        self.singleOnly = singleOnly
     }
 
     private func ask(_ prompt: String, current: String = "", kind: String = "text") async throws -> String {
@@ -792,6 +795,23 @@ final class ConfirmedBillingEditor {
         let selected = try await choose(labels, title)
         ConfirmedBilling.inputTrace("editor.menu.returned")
         return labels.firstIndex(of: selected).map { actions[$0] } ?? selected
+    }
+    private func selectTags(_ current: [Int], options: [[String: Any]]) async throws -> [Int] {
+        let original = Array(Set(current)).sorted()
+        var selected = Set(current)
+        while true {
+            let labels = options.map { row in
+                (selected.contains(row["id"] as? Int ?? -1) ? "✓ " : "○ ") + (row["name"] as? String ?? "") + " [" + String(row["id"] as? Int ?? -1) + "]"
+            }
+            let action = try await choose(["完成标签选择", "清空标签", "返回不修改"] + labels, "选择标签（可多选，点选切换状态）")
+            if action == "完成标签选择" { return selected.sorted() }
+            if action == "清空标签" { selected.removeAll(); continue }
+            if action == "返回不修改" { return original }
+            guard let index = labels.firstIndex(of: action), let id = options[index]["id"] as? Int else {
+                throw ShortcutBillingError(message: "标签选项已失效，未入账")
+            }
+            if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
+        }
     }
     @MainActor private func edit(_ initial: [String: Any], categories: [[String: Any]], tags: [[String: Any]], digits: Int, type: String, maximum: Int? = nil) async throws -> [String: Any]? {
         var entry = initial
@@ -895,7 +915,7 @@ final class ConfirmedBillingEditor {
         }
         var time = candidate["occurredAt"] as? String ?? source["editorTime"] as? String ?? ISO8601DateFormatter().string(from: Date())
         var entries: [[String: Any]] = [["amountMinor": total, "note": candidate["note"] as? String ?? "",
-            "tagIds": Array((candidate["tagIds"] as? [Int] ?? defaults["tagIds"] as? [Int] ?? []).prefix(1)),
+            "tagIds": singleOnly ? Array(Set(candidate["tagIds"] as? [Int] ?? defaults["tagIds"] as? [Int] ?? [])).sorted() : Array((candidate["tagIds"] as? [Int] ?? defaults["tagIds"] as? [Int] ?? []).prefix(1)),
             "excludeFromBudget": type == "expense" && (candidate["excludeFromBudget"] as? Bool ?? defaults["excludeFromBudget"] as? Bool ?? false)]]
         if let categoryId = candidate["categoryId"] as? Int { entries[0]["categoryId"] = categoryId }
         var didSplit = false
@@ -912,8 +932,8 @@ final class ConfirmedBillingEditor {
             let entry = entries.first ?? [:]
             let tagNames = (entry["tagIds"] as? [Int] ?? []).map { ConfirmedBilling.label($0, tags) }.joined(separator: "、")
             let directFields = single ? ["金额"] + (type == "transfer" ? [] : ["分类"]) + ["账户", "时间", "备注", "标签"] + (type == "expense" ? ["不计预算"] : []) : ["编辑明细", "删除明细", "修改原付款金额", "记账账户", "日期时间"]
-            let actions = directFields + (type == "transfer" ? ["转入账户"] : []) + (type == "expense" ? ["拆分或新增明细"] : []) + ["账本", "收支类型", "确认提交", "取消提交", "刷新有效选项"]
-            let selected = try await fields(actions, title: single ? "确认" + typeName(type) + "信息" : summary, values: [
+            let actions = directFields + (type == "transfer" ? ["转入账户"] : []) + (type == "expense" && !singleOnly ? ["拆分或新增明细"] : []) + ["账本", "收支类型", "确认提交", "取消提交", "刷新有效选项"]
+            let selected = try await fields(actions, title: singleOnly ? "单笔确认（最终确认才入账）\n" + typeName(type) + " · " + currency : single ? "确认" + typeName(type) + "信息" : summary, values: [
                 "金额": total > 0 ? ConfirmedBilling.money(total, digits: digits) : "待填写", "分类": entry["categoryId"] == nil ? "未分类" : ConfirmedBilling.label(entry["categoryId"] as? Int, categories),
                 "账户": ConfirmedBilling.label(accountId, accounts), "转入账户": ConfirmedBilling.label(toAccountId, accounts),
                 "时间": ConfirmedBilling.displayTime(time), "备注": entry["note"] as? String ?? "", "标签": tagNames.isEmpty ? "无" : tagNames,
@@ -922,7 +942,13 @@ final class ConfirmedBillingEditor {
             ])
             let action = ["金额": "修改原付款金额", "账户": "记账账户", "时间": "日期时间", "取消提交": "取消整次记账"][selected] ?? selected
             switch action {
-            case "分类": entries[0]["categoryId"] = try await pick(categories, "选择分类")
+            case "分类":
+                if singleOnly {
+                    let labels = categories.enumerated().map { String($0.offset + 1) + ". " + ($0.element["name"] as? String ?? "") }
+                    let selected = try await choose(["不分类", "返回"] + labels, "选择分类")
+                    if selected == "不分类" { entries[0].removeValue(forKey: "categoryId") }
+                    else if let index = labels.firstIndex(of: selected) { entries[0]["categoryId"] = categories[index]["id"] }
+                } else { entries[0]["categoryId"] = try await pick(categories, "选择分类") }
             case "备注":
                 ConfirmedBilling.inputTrace("bill.note.selected")
                 let old = entries[0]["note"] as? String ?? ""
@@ -935,7 +961,9 @@ final class ConfirmedBillingEditor {
                     ConfirmedBilling.inputTrace("bill.note.error_returning")
                     _ = try await choose(["返回账单"], error.localizedDescription)
                 }
-            case "标签": entries[0]["tagIds"] = ConfirmedBilling.nextTag(entries[0]["tagIds"] as? [Int] ?? [], tags: tags)
+            case "标签":
+                if singleOnly { entries[0]["tagIds"] = try await selectTags(entries[0]["tagIds"] as? [Int] ?? [], options: tags) }
+                else { entries[0]["tagIds"] = ConfirmedBilling.nextTag(entries[0]["tagIds"] as? [Int] ?? [], tags: tags) }
             case "不计预算": entries[0]["excludeFromBudget"] = !(entries[0]["excludeFromBudget"] as? Bool ?? false)
             case "取消整次记账": throw ShortcutBillingError(message: "已取消，未入账")
             case "记账账户":
@@ -953,11 +981,13 @@ final class ConfirmedBillingEditor {
                 let fresh = try await call(["operation": "options", "ledgerId": selected, "type": type])
                 let newCurrency = fresh["currency"] as? String ?? "CNY"
                 if newCurrency != currency {
-                    if try await choose(["切换并重新填写金额", "返回"], "新账本币种不同，不自动换算；切换将清空拆分金额") == "返回" { continue }
+                    if try await choose(["切换并重新填写金额", "返回"], singleOnly ? "新账本币种不同，不自动换算；切换后请重新填写金额，其他字段尽量保留" : "新账本币种不同，不自动换算；切换将清空拆分金额") == "返回" { continue }
                     total = 0
-                    while total <= 0 {
-                        let value = try await ask("请输入新账本的原金额（" + newCurrency + "）", kind: "number")
-                        total = (try? ConfirmedBilling.minor(value, digits: fresh["minorDigits"] as? Int ?? 2)) ?? 0
+                    if !singleOnly {
+                        while total <= 0 {
+                            let value = try await ask("请输入新账本的原金额（" + newCurrency + "）", kind: "number")
+                            total = (try? ConfirmedBilling.minor(value, digits: fresh["minorDigits"] as? Int ?? 2)) ?? 0
+                        }
                     }
                     var entry = entries.first ?? [:]
                     entry["amountMinor"] = total
@@ -968,8 +998,16 @@ final class ConfirmedBillingEditor {
                 categories = fresh["categories"] as? [[String: Any]] ?? []
                 accounts = fresh["accounts"] as? [[String: Any]] ?? []
                 tags = fresh["tags"] as? [[String: Any]] ?? []
-                if !accounts.contains(where: { $0["id"] as? Int == accountId }) { accountId = try await pick(accounts, "选择记账账户") }
+                if !accounts.contains(where: { $0["id"] as? Int == accountId }) {
+                    accountId = nil
+                    if !singleOnly { accountId = try await pick(accounts, "选择记账账户") }
+                }
                 if !accounts.contains(where: { $0["id"] as? Int == toAccountId }) { toAccountId = nil }
+                if singleOnly {
+                    if let id = entries[0]["categoryId"] as? Int, !categories.contains(where: { $0["id"] as? Int == id }) { entries[0].removeValue(forKey: "categoryId") }
+                    let ids = Set(tags.compactMap { $0["id"] as? Int })
+                    entries[0]["tagIds"] = (entries[0]["tagIds"] as? [Int] ?? []).filter { ids.contains($0) }
+                }
             case "收支类型":
                 let value = try await choose(["支出", "收入", "转账", "返回"], "修改类型后重新校验分类和账户；收入与转账只支持单笔")
                 if value == "返回" { continue }
@@ -987,7 +1025,7 @@ final class ConfirmedBillingEditor {
                 entries = [entry]; didSplit = false; toAccountId = nil
                 if type == "transfer" { toAccountId = try await pick(accounts.filter { $0["id"] as? Int != accountId }, "选择转入账户") }
             case "日期时间":
-                let value = try await ask("输入完整日期时间，如 2026-11-05T18:30:00+08:00", current: time)
+                let value = try await ask(singleOnly ? "修改账单日期时间" : "输入完整日期时间，如 2026-11-05T18:30:00+08:00", current: time, kind: singleOnly ? "date" : "text")
                 let formatter = ISO8601DateFormatter()
                 formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
                 if ISO8601DateFormatter().date(from: value) != nil || formatter.date(from: value) != nil { time = value }
@@ -1003,6 +1041,7 @@ final class ConfirmedBillingEditor {
                     if !didSplit && entries.count == 1 { entries[0]["amountMinor"] = amount }
                 } else { _ = try await choose(["返回修改"], "请输入有效正金额") }
             case "拆分或新增明细":
+                guard !singleOnly else { throw ShortcutBillingError(message: "本轮只支持单笔；逐笔拆分在第二轮接入，未入账") }
                 if didSplit && entries.count >= 100 {
                     _ = try await choose(["返回账单"], "最多支持 100 笔明细，请先删除已有明细，再新增")
                     continue
@@ -1055,6 +1094,7 @@ final class ConfirmedBillingEditor {
                     catch is CancellationError { continue }
                 }
             case "确认提交":
+                if singleOnly && entries.count != 1 { throw ShortcutBillingError(message: "单笔流程不能提交多笔，未入账") }
                 guard !entries.isEmpty, used == total, entries.allSatisfy({ entry in
                     (entry["amountMinor"] as? Int ?? 0) > 0 && (type == "transfer" || entry["categoryId"] == nil || categories.contains { $0["id"] as? Int == entry["categoryId"] as? Int })
                 }) else { _ = try await choose(["返回修改"], "金额尚未分配完、超额或已选分类失效，不能提交"); continue }
@@ -1393,6 +1433,7 @@ enum RecognitionBillingFlow {
                     templateMode: Bool = false,
                     independentInput: Bool = false,
                     showIncompleteDraft: Bool = false,
+                    singleOnly: Bool = false,
                     choose: @escaping ([String], String) async throws -> String,
                     input: @escaping (String) async throws -> String,
                     call: @escaping ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call,
@@ -1431,7 +1472,7 @@ enum RecognitionBillingFlow {
             draft = ["status": "draft", "requestId": UUID().uuidString,
                 "ledgerId": ledgerId, "currency": currency, "candidates": [candidate]]
         }
-        if templateMode { return try BillingStepFlow.start(ConfirmedBilling.encode(draft)) }
+        if templateMode { return try BillingStepFlow.start(ConfirmedBilling.encode(draft), showIncompleteDraft: showIncompleteDraft, singleOnly: singleOnly) }
         if independentInput { return try BillingStepFlow.start(ConfirmedBilling.encode(draft), showIncompleteDraft: showIncompleteDraft) }
         let editor = ConfirmedBillingEditor(draft: try ConfirmedBilling.encode(draft), choose: choose, input: input, showIncompleteDraft: showIncompleteDraft, call: call)
         // Cancellation exits before commit. Existing atomic/idempotent store is reused.
@@ -1857,6 +1898,203 @@ struct ConfirmAIDraftProbeIntent: AppIntent {
             return try await $amount.requestValue("修改金额：请核对 AI 识别的原金额")
         })
         return .result(value: final.summary, dialog: IntentDialog(stringLiteral: final.summary))
+    }
+}
+
+
+// MARK: - Round one: complete single bill + Shortcuts-owned system input
+
+@available(iOS 16.0, *)
+enum SingleBillingSource: String, AppEnum {
+    case image, text, expense, income, transfer
+    static var typeDisplayRepresentation: TypeDisplayRepresentation = "单笔来源"
+    static var caseDisplayRepresentations: [SingleBillingSource: DisplayRepresentation] = [
+        .image: "图片 AI", .text: "文字 AI", .expense: "手填支出", .income: "手填收入", .transfer: "手填转账"
+    ]
+}
+
+/// Per-run state carried by a Shortcuts variable, not a saved/global bill.
+/// The scalar fields feed SYSTEM Ask for Input, never requestValue.
+@available(iOS 16.0, *)
+struct SingleBillingStep: TransientAppEntity {
+    static var typeDisplayRepresentation: TypeDisplayRepresentation = "单笔编辑步骤"
+    var id = UUID()
+    @Property(title: "完整状态") var state: String
+    @Property(title: "步骤状态") var status: String
+    @Property(title: "输入提示") var prompt: String
+    @Property(title: "输入类型") var inputType: String
+    @Property(title: "当前内容") var currentText: String
+    @Property(title: "当前数字") var currentNumber: Double
+    @Property(title: "当前时间") var currentDate: Date
+    var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "单笔编辑步骤") }
+    init() {
+        state = ""; status = ""; prompt = ""; inputType = ""; currentText = ""; currentNumber = 0
+        currentDate = Date(timeIntervalSince1970: 0)
+    }
+    @MainActor init(_ envelope: String) throws {
+        self.init()
+        let object = try ConfirmedBilling.decode(envelope)
+        guard let phase = object["status"] as? String, ["editing", "input", "confirmed", "cancelled"].contains(phase) else {
+            throw ShortcutBillingError(message: "单笔步骤格式无效，未入账")
+        }
+        state = envelope; status = phase
+        if phase == "input" {
+            guard let request = object["input"] as? [String: Any],
+                  let message = request["prompt"] as? String,
+                  let value = request["currentValue"] as? String,
+                  let kind = request["inputType"] as? String, ["text", "number", "date"].contains(kind) else {
+                throw ShortcutBillingError(message: "单笔输入请求无效，未入账")
+            }
+            prompt = message; inputType = kind; currentText = value
+            if kind == "number" { currentNumber = Double(value) ?? 0 }
+            if kind == "date" {
+                guard let date = SingleBillingFlow.date(value) else { throw ShortcutBillingError(message: "当前时间格式无效，未入账") }
+                currentDate = date
+            }
+        }
+    }
+}
+
+@available(iOS 16.0, *)
+@MainActor
+enum SingleBillingFlow {
+    static func date(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    }
+    static func checkSingle(_ step: SingleBillingStep) throws {
+        let outer = try ConfirmedBilling.decode(step.state)
+        guard outer["status"] as? String == step.status else { throw ShortcutBillingError(message: "步骤状态不一致，未入账") }
+        if ["editing", "input"].contains(step.status) {
+            guard let raw = outer["state"] as? String else { throw ShortcutBillingError(message: "单笔状态缺失，未入账") }
+            let state = try ConfirmedBilling.decode(raw)
+            guard state["singleOnly"] as? Bool == true else { throw ShortcutBillingError(message: "请传入开始单笔记账的步骤，不能混用旧模板") }
+        } else if step.status == "confirmed", outer["singleOnly"] as? Bool != true {
+            throw ShortcutBillingError(message: "不是单笔确认结果，未入账")
+        }
+    }
+    static func advance(_ step: SingleBillingStep, hasResponse: Bool, text: String?, number: Double?, date: Date?,
+                        choose: @escaping ([String], String) async throws -> String,
+                        call: @escaping ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call) async throws -> SingleBillingStep {
+        try checkSingle(step)
+        guard ["editing", "input"].contains(step.status) else { throw ShortcutBillingError(message: "此步骤已结束，请勿继续编辑") }
+        var response = text
+        if step.status == "input", hasResponse {
+            let object = try ConfirmedBilling.decode(step.state)
+            let kind = (object["input"] as? [String: Any])?["inputType"] as? String
+            if kind == "number" {
+                guard let number, number.isFinite else { throw ShortcutBillingError(message: "请把系统数字输入结果连接到数字结果") }
+                // Currency precision/range is checked by the integer-money parser
+                // in the editor. Do not silently round off an invalid input.
+                guard let decimal = Decimal(string: String(number), locale: Locale(identifier: "en_US_POSIX")) else {
+                    throw ShortcutBillingError(message: "数字格式无效，未入账")
+                }
+                response = NSDecimalNumber(decimal: decimal).stringValue
+            } else if kind == "date" {
+                guard let date else { throw ShortcutBillingError(message: "请把系统日期时间结果连接到日期结果") }
+                response = ISO8601DateFormatter().string(from: date)
+            }
+        }
+        return try SingleBillingStep(await BillingStepFlow.advance(step.state, response: response, hasResponse: hasResponse, choose: choose, call: call))
+    }
+    static func save(_ step: SingleBillingStep, attachment: IntentFile?,
+                     commit: ([String: Any], IntentFile?) async throws -> String = { try await ConfirmedBilling.commit($0, attachment: $1) }) async throws -> String {
+        try checkSingle(step)
+        let outer = try ConfirmedBilling.decode(step.state)
+        guard step.status == "confirmed", let raw = outer["submission"] as? String else {
+            throw ShortcutBillingError(message: "尚未最终确认，不可入账")
+        }
+        let submission = try ConfirmedBilling.decode(raw)
+        guard submission["confirmed"] as? Bool == true,
+              let entries = submission["entries"] as? [[String: Any]], entries.count == 1 else {
+            throw ShortcutBillingError(message: "单笔提交内容无效，未入账")
+        }
+        // Existing commit validates live references and deduplicates request IDs.
+        return try await commit(submission, attachment)
+    }
+}
+
+@available(iOS 16.0, *)
+struct StartSingleBillingIntent: AppIntent {
+    static var isDiscoverable = true
+    static var title: LocalizedStringResource = "开始单笔记账（系统输入）"
+    static var description: LocalizedStringResource = "图片/文字只识别一次，或手填预设。本动作只产生草稿；配合继续单笔确认、系统请求输入及最终保存。第一轮不含拆分。图片会发送给 App 配置的视觉服务。"
+    static var openAppWhenRun = false
+    @Parameter(title: "来源", default: .image) var source: SingleBillingSource
+    @Parameter(title: "图片") var image: IntentFile?
+    @Parameter(title: "文字", inputConnectionBehavior: .never) var text: String?
+    @Parameter(title: "账本") var ledger: BillingLedger?
+    @Parameter(title: "金额（手填模式）", inputConnectionBehavior: .never) var amount: String?
+    @Parameter(title: "备注（手填模式）", inputConnectionBehavior: .never) var note: String?
+    @Parameter(title: "时间（手填模式）") var date: Date?
+    @Parameter(title: "分类（手填模式）") var category: BillingCategory?
+    @Parameter(title: "账户（手填模式）") var account: BillingAccount?
+    @Parameter(title: "转入账户（手填转账）") var destination: BillingAccount?
+    @Parameter(title: "标签（留空跟随 App）") var tags: [BillingTag]?
+    @Parameter(title: "清空标签", default: false) var clearTags: Bool
+    @Parameter(title: "不计预算（支出，留空跟随 App）") var excluded: Bool?
+    @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
+    static var parameterSummary: some ParameterSummary {
+        Summary("开始\(\.$source)单笔草稿") { \.$image; \.$text; \.$ledger; \.$amount; \.$note; \.$date; \.$category; \.$account; \.$destination; \.$tags; \.$clearTags; \.$excluded }
+    }
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<SingleBillingStep> {
+        let config = RecognitionBillingFlow.configuration(ledger: ledger, tags: tags, clearTags: clearTags, excluded: excluded)
+        let state: String
+        if source == .image || source == .text {
+            if source == .image && image == nil { throw ShortcutBillingError(message: "请连接图片；未入账") }
+            let content = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if source == .text && content.isEmpty { throw ShortcutBillingError(message: "请连接文字或 OCR 结果；未入账") }
+            state = try await RecognitionBillingFlow.run(image: source == .image ? image : nil, text: source == .text ? content : nil,
+                configuration: config, templateMode: true, showIncompleteDraft: true, singleOnly: true,
+                choose: { values, prompt in try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt)) },
+                input: { _ in throw ShortcutBillingError(message: "请使用系统请求输入") })
+        } else {
+            let type = source == .income ? "income" : source == .transfer ? "transfer" : "expense"
+            let options = try await ConfirmedBilling.call(config.merging(["operation": "options", "type": type]) { _, new in new })
+            let defaults = options["defaults"] as? [String: Any] ?? [:]
+            let effectiveTags = clearTags ? [BillingTag]() : tags
+            let draft = try await CustomBilling.draft(type: type, ledger: ledger, category: category, amount: amount, date: date, note: note, account: account,
+                destination: destination, tags: effectiveTags, excluded: excluded ?? (defaults["excludeFromBudget"] as? Bool ?? false))
+            state = try BillingStepFlow.start(draft, showIncompleteDraft: true, singleOnly: true)
+        }
+        return .result(value: try SingleBillingStep(state))
+    }
+}
+
+@available(iOS 16.0, *)
+struct ContinueSingleBillingIntent: AppIntent {
+    static var isDiscoverable = true
+    static var title: LocalizedStringResource = "继续单笔确认（系统输入）"
+    static var description: LocalizedStringResource = "显示完整单笔菜单。备注/金额/时间编辑返回输入请求，由快捷指令系统请求输入预填后继续；本动作不保存账单。"
+    static var openAppWhenRun = false
+    @Parameter(title: "上一步骤") var step: SingleBillingStep
+    @Parameter(title: "已提供输入", default: false) var hasResponse: Bool
+    @Parameter(title: "文字结果", inputConnectionBehavior: .never) var text: String?
+    @Parameter(title: "数字结果", inputConnectionBehavior: .never) var number: Double?
+    @Parameter(title: "日期结果", inputConnectionBehavior: .never) var date: Date?
+    @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
+    static var parameterSummary: some ParameterSummary {
+        Summary("继续单笔确认 \(\.$step)") { \.$hasResponse; \.$text; \.$number; \.$date }
+    }
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<SingleBillingStep> {
+        .result(value: try await SingleBillingFlow.advance(step, hasResponse: hasResponse, text: text, number: number, date: date,
+            choose: { values, prompt in try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt)) }))
+    }
+}
+
+@available(iOS 16.0, *)
+struct SaveSingleBillingIntent: AppIntent {
+    static var isDiscoverable = true
+    static var title: LocalizedStringResource = "保存已确认单笔账单"
+    static var description: LocalizedStringResource = "仅接受单笔步骤中的最终确认结果，真实写入账单。相同请求重试去重；可连接原图作为附件。"
+    static var openAppWhenRun = false
+    @Parameter(title: "最终确认步骤") var step: SingleBillingStep
+    @Parameter(title: "附带图片（可选）", inputConnectionBehavior: .never) var attachment: IntentFile?
+    static var parameterSummary: some ParameterSummary { Summary("保存已确认单笔 \(\.$step)") { \.$attachment } }
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+        let saved = try await SingleBillingFlow.save(step, attachment: attachment)
+        return .result(value: saved, dialog: try CustomBilling.result(saved))
     }
 }
 
