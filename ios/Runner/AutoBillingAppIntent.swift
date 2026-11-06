@@ -190,11 +190,7 @@ enum ConfirmedBilling {
         guard current.count == 1, let index = ids.firstIndex(of: current[0]) else { return [ids[0]] }
         return [ids[(index + 1) % ids.count]]
     }
-    static func updatedNote(_ old: String, action: String, value: String?) -> String {
-        if action == "保存空备注" { return "" }
-        guard action != "取消修改", let value else { return old }
-        return action == "追加" ? old + value : value
-    }
+    static func updatedNote(_ old: String, value: String?) -> String { value ?? old }
     static func encode(_ value: [String: Any]) throws -> String {
         String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
     }
@@ -275,8 +271,29 @@ enum ConfirmedBilling {
             request.usesLanguageCorrection = true
             request.recognitionLanguages = ["zh-Hans", "en-US"]
             try VNImageRequestHandler(data: data).perform([request])
-            return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+            let fragments = (request.results ?? []).compactMap { observation -> (text: String, box: CGRect)? in
+                guard let candidate = observation.topCandidates(1).first else { return nil }
+                return (candidate.string, observation.boundingBox)
+            }
+            return receiptText(fragments)
         }.value
+    }
+    // Vision may return labels before values. Reconstruct rows geometrically.
+    nonisolated static func receiptText(_ fragments: [(text: String, box: CGRect)]) -> String {
+        let sorted = fragments.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.box.height > 0 }.sorted {
+            $0.box.midY == $1.box.midY ? $0.box.minX < $1.box.minX : $0.box.midY > $1.box.midY
+        }
+        var rows: [[(text: String, box: CGRect)]] = []
+        for fragment in sorted {
+            if let index = rows.firstIndex(where: { row in
+                let anchor = row[0].box
+                let overlap = min(anchor.maxY, fragment.box.maxY) - max(anchor.minY, fragment.box.minY)
+                return overlap >= min(anchor.height, fragment.box.height) * 0.5 &&
+                    abs(anchor.midY - fragment.box.midY) <= min(anchor.height, fragment.box.height) * 0.5
+            }) { rows[index].append(fragment) }
+            else { rows.append([fragment]) }
+        }
+        return rows.map { row in row.sorted { $0.box.minX < $1.box.minX }.map { $0.text }.joined(separator: "\t") }.joined(separator: "\n")
     }
     static func displayTime(_ value: String) -> String {
         let fractional = ISO8601DateFormatter()
@@ -479,7 +496,7 @@ final class ConfirmedBillingEditor {
         let selected = try await choose(labels, title)
         return labels.firstIndex(of: selected).map { actions[$0] } ?? selected
     }
-    @MainActor private func edit(_ initial: [String: Any], categories: [[String: Any]], tags: [[String: Any]], digits: Int, type: String, maximum: Int? = nil) async throws -> [String: Any] {
+    @MainActor private func edit(_ initial: [String: Any], categories: [[String: Any]], tags: [[String: Any]], digits: Int, type: String, maximum: Int? = nil) async throws -> [String: Any]? {
         var entry = initial
         while true {
             let fields = ["完成此笔", "金额"] + (type == "transfer" ? [] : ["分类"]) + ["备注", "标签"] + (type == "expense" ? ["预算标记"] : []) + ["取消本次字段修改"]
@@ -508,17 +525,12 @@ final class ConfirmedBillingEditor {
             case "分类": entry["categoryId"] = try await pick(categories, "选择分类")
             case "备注":
                 let old = entry["note"] as? String ?? ""
-                let action = try await choose(["编辑", "追加", "清空重填", "保存空备注", "取消修改"], "原备注：" + old)
-                var value: String?
-                if action != "保存空备注" && action != "取消修改" {
-                    do { value = try await input((action == "追加" ? "追加内容；原备注：" : "输入最终备注；原备注：") + old) }
-                    catch is CancellationError { value = nil }
-                    catch { _ = try await choose(["返回账单"], error.localizedDescription); value = nil }
-                }
-                entry["note"] = ConfirmedBilling.updatedNote(old, action: action, value: value)
+                do { entry["note"] = ConfirmedBilling.updatedNote(old, value: try await input("修改备注（可留空）；原备注：" + old)) }
+                catch is CancellationError { continue }
+                catch { _ = try await choose(["返回账单"], error.localizedDescription) }
             case "标签": entry["tagIds"] = ConfirmedBilling.nextTag(entry["tagIds"] as? [Int] ?? [], tags: tags)
             case "预算标记": entry["excludeFromBudget"] = !(entry["excludeFromBudget"] as? Bool ?? false)
-            default: return initial
+            default: return nil
             }
         }
     }
@@ -573,6 +585,7 @@ final class ConfirmedBillingEditor {
             "excludeFromBudget": type == "expense" && (candidate["excludeFromBudget"] as? Bool ?? defaults["excludeFromBudget"] as? Bool ?? false)]]
         if let categoryId = candidate["categoryId"] as? Int { entries[0]["categoryId"] = categoryId }
         var didSplit = false
+        var splitTemplate = entries[0]
         func typeName(_ value: String) -> String { value == "income" ? "收入" : value == "transfer" ? "转账" : "支出" }
         while true {
             let used = entries.reduce(0) { $0 + ($1["amountMinor"] as? Int ?? 0) }
@@ -598,14 +611,9 @@ final class ConfirmedBillingEditor {
             case "分类": entries[0]["categoryId"] = try await pick(categories, "选择分类")
             case "备注":
                 let old = entries[0]["note"] as? String ?? ""
-                let operation = try await choose(["编辑", "追加", "清空重填", "保存空备注", "取消修改"], "原备注：" + old)
-                var value: String?
-                if operation != "保存空备注" && operation != "取消修改" {
-                    do { value = try await input("输入备注；原备注：" + old) }
-                    catch is CancellationError { value = nil }
-                    catch { _ = try await choose(["返回账单"], error.localizedDescription); value = nil }
-                }
-                entries[0]["note"] = ConfirmedBilling.updatedNote(old, action: operation, value: value)
+                do { entries[0]["note"] = ConfirmedBilling.updatedNote(old, value: try await input("修改备注（可留空）；原备注：" + old)) }
+                catch is CancellationError { continue }
+                catch { _ = try await choose(["返回账单"], error.localizedDescription) }
             case "标签": entries[0]["tagIds"] = ConfirmedBilling.nextTag(entries[0]["tagIds"] as? [Int] ?? [], tags: tags)
             case "不计预算": entries[0]["excludeFromBudget"] = !(entries[0]["excludeFromBudget"] as? Bool ?? false)
             case "取消整次记账": throw ShortcutBillingError(message: "已取消，未入账")
@@ -673,23 +681,29 @@ final class ConfirmedBillingEditor {
                     if !didSplit && entries.count == 1 { entries[0]["amountMinor"] = amount }
                 } else { _ = try await choose(["返回修改"], "请输入有效正金额") }
             case "拆分或新增明细":
-                if !didSplit {
-                    if try await choose(["开始拆分", "返回"], "原整笔草稿将替换为逐笔明细，暂不入账") == "返回" { continue }
-                    entries = []; didSplit = true
-                }
-                guard entries.count < 100 else { continue }
-                let remaining = total - entries.reduce(0) { $0 + ($1["amountMinor"] as? Int ?? 0) }
+                guard !didSplit || entries.count < 100 else { continue }
+                let remaining = didSplit ? total - entries.reduce(0) { $0 + ($1["amountMinor"] as? Int ?? 0) } : total
                 guard remaining > 0 else { continue }
-                var entry: [String: Any] = ["amountMinor": remaining, "note": candidate["note"] as? String ?? "", "tagIds": Array((candidate["tagIds"] as? [Int] ?? defaults["tagIds"] as? [Int] ?? []).prefix(1)), "excludeFromBudget": candidate["excludeFromBudget"] as? Bool ?? defaults["excludeFromBudget"] as? Bool ?? false]
-                entry = try await edit(entry, categories: categories, tags: tags, digits: digits, type: type, maximum: remaining)
-                if (entry["amountMinor"] as? Int ?? 0) <= remaining { entries.append(entry) }
+                // Preserve edited values, not the original AI candidate.
+                if !didSplit, let first = entries.first { splitTemplate = first }
+                var initial = splitTemplate
+                initial["amountMinor"] = remaining
+                do {
+                    guard let entry = try await edit(initial, categories: categories, tags: tags, digits: digits, type: type, maximum: remaining) else { continue }
+                    if !didSplit { entries = []; didSplit = true }
+                    entries.append(entry)
+                } catch is CancellationError { continue }
             case "编辑明细", "删除明细":
                 guard !entries.isEmpty else { continue }
                 let labels = entries.enumerated().map { "第 " + String($0.offset + 1) + " 笔 " + ConfirmedBilling.money($0.element["amountMinor"] as? Int ?? 0, digits: digits) }
                 let selected = try await choose(labels + ["返回"], "选择明细")
                 guard let index = labels.firstIndex(of: selected) else { continue }
                 if action == "删除明细" { entries.remove(at: index); didSplit = true }
-                else { entries[index] = try await edit(entries[index], categories: categories, tags: tags, digits: digits, type: type) }
+                else {
+                    do {
+                        if let entry = try await edit(entries[index], categories: categories, tags: tags, digits: digits, type: type) { entries[index] = entry }
+                    } catch is CancellationError { continue }
+                }
             case "确认提交":
                 guard !entries.isEmpty, used == total, entries.allSatisfy({ entry in
                     (entry["amountMinor"] as? Int ?? 0) > 0 && (type == "transfer" || entry["categoryId"] == nil || categories.contains { $0["id"] as? Int == entry["categoryId"] as? Int })

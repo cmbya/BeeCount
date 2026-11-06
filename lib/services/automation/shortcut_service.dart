@@ -117,7 +117,7 @@ class ShortcutService {
       'minorDigits': shortcutCurrencyDigits(ledger.currency),
       'ledgers': ledgers.map((l) => {'id': l.id, 'name': l.name}).toList(),
       'accounts': accounts.map((a) => {
-        'id': a.id, 'name': a.name,
+        'id': a.id, 'name': a.name, 'type': a.type,
         if (a.bankName != null) 'bankName': a.bankName,
         if (a.cardLastFour != null) 'cardLastFour': a.cardLastFour,
       }).toList(),
@@ -228,7 +228,9 @@ class ShortcutService {
           ? value['type'] as String
           : 'expense';
       final usable = allUsable.where((c) => c.kind == type).toList();
-      final note = buildNote(value, sourceText: ruleText);
+      // Whole-page OCR must not overwrite several independent AI candidates.
+      final candidateText = raw.length == 1 ? ruleText : '';
+      final note = buildNote(value, sourceText: candidateText);
       final merchant =
           value['merchant'] is String ? value['merchant'] as String : '';
       final warnings = <String>[
@@ -285,10 +287,10 @@ class ShortcutService {
       }
       final clue = value['account'] is String ? value['account'] as String : '';
       final accountId = (explicitAccount as int?) ??
-          matchAccount(accounts, clue: clue, text: '');
+          matchAccount(accounts, clue: clue, text: candidateText);
       // No default-account fallback, including when recognition is ambiguous.
       final time = recognizedTime(value['time']?.toString() ?? '',
-          sourceText: ruleText,
+          sourceText: candidateText,
           offsetSeconds: input['timeZoneOffsetSeconds'] is int
               ? input['timeZoneOffsetSeconds'] as int : DateTime.now().timeZoneOffset.inSeconds);
       candidates.add({
@@ -326,33 +328,63 @@ class ShortcutService {
   }
 
 
+  // Labels are boundaries, never field values. Horizontal whitespace only:
+  // \s also matches newlines and used to turn '商户全称\n收单机构' into a note.
+  static const _receiptLabels = <String>[
+    '当前状态', '支付状态', '交易状态', '支付时间', '付款时间', '交易时间', '收款时间',
+    '商品', '商品说明', '用途', '商户全称', '商户名称', '商家名称',
+    '收单机构', '支付方式', '付款方式', '付款账户', '收款账户',
+    '交易单号', '商户单号', '订单号', '用户备注', '付款备注', '附言',
+  ];
+
+  /// null: label absent; empty: label present but ambiguous/missing value.
+  /// Never pair a column of labels with the next label or an arbitrary value.
+  static String? receiptField(String text, List<String> labels) {
+    final rows = text.split(RegExp(r'[\r\n；;]'))
+        .map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+    final boundary = RegExp('^(?:' + _receiptLabels.map(RegExp.escape).join('|') + r')(?=$|[ \t:：])');
+    final values = <String>{};
+    var found = false;
+    for (var i = 0; i < rows.length; i++) {
+      for (final label in labels) {
+        final match = RegExp('^' + RegExp.escape(label) + r'(?:[ \t]*[:：][ \t]*|[ \t]+|$)(.*)$').firstMatch(rows[i]);
+        if (match == null) continue;
+        found = true;
+        var value = match[1]!.trim();
+        if (value.isEmpty && i + 1 < rows.length && !boundary.hasMatch(rows[i + 1])) {
+          // Only accept a single adjacent value, not the start of a value column.
+          if (i + 2 == rows.length || boundary.hasMatch(rows[i + 2])) value = rows[i + 1];
+        }
+        if (value.isNotEmpty && !boundary.hasMatch(value)) values.add(value);
+      }
+    }
+    return values.length == 1 ? values.single : found ? '' : null;
+  }
+
   /// Normalize generated notes only; never rewrite a user's later edits.
   static String buildNote(Map<String, dynamic> value, {String sourceText = ''}) {
-    String field(List<String> labels) {
-      for (final label in labels) {
-        final match = RegExp('(?:^|[\\n；;])\\s*' + label + r'(?:\s*[:：]\s*|\s+)([^\n；;]+)').firstMatch(sourceText);
-        if (match != null) return match[1]!.trim();
-      }
-      return '';
-    }
     String clean(dynamic raw) {
       if (raw is! String) return '';
-      return raw.split(RegExp(r'[\n；;]')).map((s) => s.trim()).where((s) =>
-          s.isNotEmpty && !RegExp(r'^(当前状态|支付状态|交易状态|支付时间|交易时间|交易单号|商户单号|订单号|收单机构|支付方式)\s*[:：]').hasMatch(s) &&
+      final metadata = RegExp(r'^(当前状态|支付状态|交易状态|支付时间|付款时间|交易时间|收款时间|交易单号|商户单号|订单号|收单机构|支付方式|付款方式|付款账户|收款账户)(?:$|[ \t:：])');
+      return raw.split(RegExp(r'[\r\n；;｜]')).map((s) => s.trim()).where((s) =>
+          s.isNotEmpty && !metadata.hasMatch(s) && !_receiptLabels.contains(s) &&
           !RegExp(r'^(支付成功|交易成功|付款成功)$').hasMatch(s)).join(' ');
     }
     String pick(List<String> labels, dynamic fallback) {
-      final original = field(labels);
-      return clean(original.isNotEmpty ? original : fallback);
+      final original = receiptField(sourceText, labels);
+      return clean(original ?? fallback);
     }
-    final merchant = pick(['商户全称', '商户名称', '商家名称'], value['merchant']);
-    final purpose = pick(['商品', '商品说明', '用途'], value['purpose']);
-    final userNote = pick(['用户备注', '付款备注', '附言'], value['userNote']);
+    // If a structured receipt supplies merchant/product, no unlabelled AI
+    // 'user note' may add an invented paraphrase on each recognition.
+    final structured = receiptField(sourceText, ['商户全称', '商户名称', '商家名称', '商品', '商品说明', '用途']) != null;
+    final merchant = pick(['商户全称', '商户名称', '商家名称'], structured ? '' : value['merchant']);
+    final purpose = pick(['商品', '商品说明', '用途'], structured ? '' : value['purpose']);
+    final userNote = pick(['用户备注', '付款备注', '附言'], structured ? '' : value['userNote']);
     final parts = <String>[];
     for (final part in [merchant, purpose, userNote]) {
       if (part.isNotEmpty && !parts.contains(part)) parts.add(part);
     }
-    if (parts.isEmpty && !value.containsKey('purpose') && !value.containsKey('userNote')) {
+    if (!structured && parts.isEmpty && !value.containsKey('purpose') && !value.containsKey('userNote')) {
       final legacy = clean(value['note']);
       if (legacy.isNotEmpty && legacy.length <= 120) parts.add(legacy);
     }
@@ -371,8 +403,8 @@ class ShortcutService {
       final normalized = '${match[1]}-${pad(match[2])}-${pad(match[3])}T${pad(match[4])}:${pad(match[5])}:${pad(match[6])}Z';
       return parseShortcutDate(normalized)?.subtract(Duration(seconds: offsetSeconds));
     }
-    final labeled = RegExp(r'(?:支付时间|付款时间|交易时间|收款时间)\s*[:：]?\s*(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?[T\s]+\d{1,2}:\d{2}(?::\d{2})?)').firstMatch(sourceText);
-    return (labeled == null ? null : parse(labeled[1]!)) ?? parse(aiTime);
+    final labeled = receiptField(sourceText, ['支付时间', '付款时间', '交易时间', '收款时间']);
+    return (labeled == null ? null : parse(labeled)) ?? parse(aiTime);
   }
 
   static int? matchSuggestedCategory(List<Map<String, dynamic>> categories,
@@ -383,43 +415,71 @@ class ShortcutService {
         (c['leafName'] == name || c['name'] == name)).toList();
     return matches.length == 1 ? matches.single['id'] as int : null;
   }
-  /// Require a unique match using actual account-name/bank/tail evidence.
-  /// A bank-only clue that fits two cards must prompt, never select the first.
+  /// Match payment-field evidence, not arbitrary banks/platforms on the page.
+  /// Bank aliases are canonicalized, but multiple cards still require a choice.
   static int? matchAccount(List<Map<String, dynamic>> accounts,
       {required String clue, required String text}) {
-    String normalize(String value) => value.toLowerCase()
-        .replaceAll(RegExp(r'[\s\-—_（）()·]'), '');
-    final evidence = normalize(clue.trim().isNotEmpty ? clue : text);
-    if (evidence.isEmpty) return null;
-    bool hasTail(String tail) => RegExp(r'^\d{4}$').hasMatch(tail) &&
-        RegExp(r'(^|[^0-9])' + RegExp.escape(tail) + r'([^0-9]|$)').hasMatch(evidence);
+    const aliases = <String, List<String>>{
+      '招商银行': ['招商银行', '招行', '招商'],
+      '工商银行': ['中国工商银行', '工商银行', '工行'],
+      '建设银行': ['中国建设银行', '建设银行', '建行'],
+      '农业银行': ['中国农业银行', '农业银行', '农行'],
+      '中国银行': ['中国银行', '中行'],
+      '交通银行': ['交通银行', '交行'],
+      '邮储银行': ['中国邮政储蓄银行', '邮政储蓄银行', '邮储银行', '邮储'],
+      '中信银行': ['中信银行', '中信'],
+      '光大银行': ['中国光大银行', '光大银行', '光大'],
+      '民生银行': ['中国民生银行', '民生银行', '民生'],
+      '兴业银行': ['兴业银行', '兴业'],
+      '浦发银行': ['上海浦东发展银行', '浦东发展银行', '浦发银行', '浦发'],
+      '平安银行': ['平安银行'],
+      '广发银行': ['广发银行', '广发'],
+      '华夏银行': ['华夏银行', '华夏'],
+    };
+    String normalize(String value) {
+      var result = value.toLowerCase().replaceAll(RegExp(r'[\s\-—_（）()·:：*]'), '');
+      for (final entry in aliases.entries) {
+        // One substitution per family: never recursively expand the canonical name.
+        result = result.replaceAll(RegExp(entry.value.map(RegExp.escape).join('|')), entry.key);
+      }
+      return result.replaceAll('贷记卡', '信用卡').replaceAll('借记卡', '储蓄卡');
+    }
+    Set<String> banks(String value) => aliases.keys.where(value.contains).toSet();
+    String cardKind(String value) => value.contains('信用') ? 'credit' :
+        value.contains('储蓄') || value.contains('借记') ? 'debit' : '';
+    final payment = receiptField(text, ['支付方式', '付款方式', '付款账户', '收款账户']);
+    // An explicitly present but unreadable/ambiguous field must not be replaced
+    // with a model guess. With no labelled field, use only the model's clue.
+    final evidence = normalize(payment ?? clue);
+    if (evidence.isEmpty || RegExp(r'收单机构|交易单号|商户单号|订单号').hasMatch(evidence)) return null;
+    final evidenceBanks = banks(evidence);
+    if (evidenceBanks.length > 1) return null;
+    final evidenceKind = cardKind(evidence);
+    final tails = RegExp(r'(?<!\d)\d{4}(?!\d)').allMatches(evidence).map((m) => m[0]!).toSet();
+    if (tails.length > 1) return null;
     final matches = accounts.where((a) {
       final name = normalize(a['name'] as String? ?? '');
       final bank = normalize(a['bankName'] as String? ?? '');
+      final accountBanks = banks('$name $bank');
       final tail = a['cardLastFour'] as String? ?? '';
+      final kind = a['type'] == 'credit_card' ? 'credit' : cardKind(name);
+      if (evidenceBanks.isNotEmpty && accountBanks.isEmpty && !tails.contains(tail)) return false;
+      if (evidenceBanks.isNotEmpty && accountBanks.isNotEmpty && !evidenceBanks.any(accountBanks.contains)) return false;
+      if (evidenceKind.isNotEmpty && kind.isNotEmpty && evidenceKind != kind) return false;
+      // A known tail mismatch is a conflict, even if the account name matches.
+      if (tails.isNotEmpty && tail.isNotEmpty && !tails.contains(tail)) return false;
       return (name.length >= 2 && evidence.contains(name)) ||
-          (bank.length >= 2 && evidence.contains(bank)) || hasTail(tail);
+          (bank.length >= 2 && evidence.contains(bank)) ||
+          (evidenceBanks.isNotEmpty && evidenceBanks.any(accountBanks.contains)) ||
+          (tail.isNotEmpty && tails.contains(tail));
     }).toList();
-    final byTail = matches.where((a) => hasTail(a['cardLastFour'] as String? ?? '')).toList();
-    if (RegExp(r'(尾号|尾数|末四位|末4位)[:：*]*[0-9]{4}').hasMatch(evidence) && byTail.isEmpty) {
-      return null;
+    if (tails.isNotEmpty) {
+      final exact = matches.where((a) => tails.contains(a['cardLastFour'])).toList();
+      if (exact.isNotEmpty) return exact.length == 1 ? exact.single['id'] as int : null;
+      // Unconfigured tails may be ignored only for an otherwise unique match.
+      // Configured conflicting tails were already removed above.
     }
-    final byBank = matches.where((a) {
-      final bank = normalize(a['bankName'] as String? ?? '');
-      return bank.length >= 2 && evidence.contains(bank);
-    }).toList();
-    final byName = matches.where((a) {
-      final name = normalize(a['name'] as String? ?? '');
-      return name.length >= 2 && evidence.contains(name);
-    }).toList();
-    var unique = byTail.isNotEmpty ? byTail : matches;
-    if (byTail.isNotEmpty && byBank.isNotEmpty) {
-      unique = unique.where((a) => byBank.any((b) => b['id'] == a['id'])).toList();
-    }
-    if (byTail.isNotEmpty && byName.isNotEmpty) {
-      unique = unique.where((a) => byName.any((b) => b['id'] == a['id'])).toList();
-    }
-    return unique.length == 1 ? unique.single['id'] as int : null;
+    return matches.length == 1 ? matches.single['id'] as int : null;
   }
 
 }

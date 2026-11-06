@@ -173,4 +173,75 @@ void main() {
     expect(row.amount, 127.89);
   });
 
+  test('bank aliases and card kind resolve only unique compatible accounts', () {
+    final accounts = <Map<String, dynamic>>[
+      {'id': 1, 'name': '招行信用卡', 'type': 'credit_card'},
+      {'id': 2, 'name': '招行储蓄卡', 'type': 'bank'},
+      {'id': 3, 'name': '支付宝'},
+      {'id': 4, 'name': '光大信用卡', 'type': 'credit_card'}
+    ];
+    expect(ShortcutService.matchAccount(accounts, clue: '招商银行信用卡(4276)', text: ''), 1);
+    expect(ShortcutService.matchAccount(accounts, clue: '招商银行借记卡', text: ''), 2);
+    expect(ShortcutService.matchAccount(accounts, clue: '招商银行', text: ''), isNull);
+    expect(ShortcutService.matchAccount(accounts, clue: '支付宝',
+      text: '收单机构 中国光大银行\n支付方式 招商银行信用卡(4276)'), 1);
+    expect(ShortcutService.matchAccount(accounts, clue: '', text: '收单机构：中国光大银行'), isNull);
+    expect(ShortcutService.matchAccount(accounts, clue: '支付宝', text: '支付方式\n付款账户'), isNull);
+    expect(ShortcutService.matchAccount([...accounts, {'id': 5, 'name': '招行另一信用卡', 'type': 'credit_card'}],
+      clue: '招商银行信用卡', text: ''), isNull);
+    expect(ShortcutService.matchAccount([{'id': 1, 'name': '招行信用卡', 'cardLastFour': '1234'}],
+      clue: '招商银行信用卡(4276)', text: ''), isNull);
+  });
+
+  test('receipt fields never consume another label or guess a value column', () {
+    const columns = '商品\n商户全称\n收单机构\n支付方式\n生活缴费\n广东电网有限责任公司\n中国光大银行\n招商银行信用卡(4276)';
+    final text = columns;
+    expect(ShortcutService.receiptField(text, ['商品']), '');
+    expect(ShortcutService.receiptField(text, ['商户全称']), '');
+    expect(ShortcutService.buildNote({'merchant': '收单机构', 'purpose': '商户全称', 'userNote': '随机附言'}, sourceText: text), '');
+    expect(ShortcutService.receiptField('商户全称\n广东电网\n商品\n生活缴费', ['商户全称']), '广东电网');
+    expect(ShortcutService.receiptField('商品：生活缴费\n商品：购物', ['商品']), '');
+  });
+
+  test('paired OCR fixes note and payment clue across both AI entrances', () async {
+    final credit = await repo.createAccount(ledgerId: ledger, name: '招行信用卡', type: 'credit_card');
+    await repo.createAccount(ledgerId: ledger, name: '招行储蓄卡', type: 'bank');
+    const receipt = '当前状态\t支付成功\n支付时间\t2026年11月5日 12:32:45\n商品\t生活缴费\n商户全称\t广东电网有限责任公司\n收单机构\t中国光大银行\n支付方式\t招商银行信用卡(4276)';
+    final text = receipt;
+    var modelNote = '随机备注一';
+    final service = ShortcutService(container, extract: (_, __) async => jsonEncode([
+      {'type': 'expense', 'amount': '300', 'merchant': modelNote, 'purpose': modelNote, 'userNote': modelNote,
+       'account': '支付宝', 'time': '2026-11-06T00:00:00Z'}
+    ]));
+    for (final mode in ['text', 'image']) {
+      final first = await service.handle({'operation': 'recognize', 'mode': mode,
+        'text': text, 'ruleText': text, 'imagePath': 'fixture.jpg', 'timeZoneOffsetSeconds': 8 * 3600});
+      modelNote = '随机备注二';
+      final second = await service.handle({'operation': 'recognize', 'mode': mode,
+        'text': text, 'ruleText': text, 'imagePath': 'fixture.jpg', 'timeZoneOffsetSeconds': 8 * 3600});
+      for (final result in [first, second]) {
+        final candidate = result['candidates'][0];
+        expect(candidate['note'], '广东电网有限责任公司｜生活缴费');
+        expect(candidate['accountId'], credit);
+        expect(candidate['requiresAccountSelection'], false);
+        expect(DateTime.parse(candidate['occurredAt'] as String), DateTime.utc(2026, 11, 5, 4, 32, 45));
+      }
+    }
+    expect(await db.select(db.transactions).get(), isEmpty);
+  });
+
+  test('page fields do not overwrite independent candidates', () async {
+    final service = ShortcutService(container, extract: (_, __) async => jsonEncode([
+      {'type': 'expense', 'amount': '10', 'merchant': '商家甲', 'purpose': '餐费', 'time': '2026-11-04T10:00:00Z'},
+      {'type': 'expense', 'amount': '20', 'merchant': '商家乙', 'purpose': '交通', 'time': '2026-11-05T10:00:00Z'}
+    ]));
+    final result = await service.handle({'operation': 'recognize', 'mode': 'text',
+      'text': '商户全称：页面商家\n商品：页面商品\n支付时间：2026-11-06T10:00:00Z'});
+    expect(result['candidates'][0]['note'], '商家甲｜餐费');
+    expect(result['candidates'][1]['note'], '商家乙｜交通');
+    expect(result['candidates'][0]['occurredAt'], '2026-11-04T10:00:00.000Z');
+    expect(result['candidates'][1]['occurredAt'], '2026-11-05T10:00:00.000Z');
+    expect(await db.select(db.transactions).get(), isEmpty);
+  });
+
 }
