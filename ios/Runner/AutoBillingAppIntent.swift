@@ -1671,4 +1671,193 @@ struct ShortcutInputPrefillProbeIntent: AppIntent {
     }
 }
 
+
+// MARK: - Two-action AI -> Shortcuts-variable prefill probe (never commits)
+
+/// A per-invocation value, not a saved bill or a queryable global draft.
+/// @Property exposes scalar fields to Shortcuts' Magic Variable picker.
+@available(iOS 16.0, *)
+struct ShortcutAIDraftProbeEntity: TransientAppEntity {
+    static var typeDisplayRepresentation: TypeDisplayRepresentation = "AI 测试草稿"
+    var id = UUID()
+    @Property(title: "备注") var note: String
+    @Property(title: "金额") var amount: Double
+    @Property(title: "币种") var currency: String
+    @Property(title: "小数位数") var minorDigits: Int
+    var displayRepresentation: DisplayRepresentation {
+        DisplayRepresentation(title: "AI 测试草稿（未保存）")
+    }
+    init() {
+        note = ""; amount = 0; currency = ""; minorDigits = 2
+    }
+    init(note: String, amount: Double, currency: String, minorDigits: Int) {
+        self.init()
+        self.note = note; self.amount = amount
+        self.currency = currency; self.minorDigits = minorDigits
+    }
+}
+
+@available(iOS 16.0, *)
+struct ShortcutAIPrefillProbeState {
+    var note: String
+    var amount: Double
+    let currency: String
+    let minorDigits: Int
+    var amountText: String {
+        String(format: "%.*f", locale: Locale(identifier: "en_US_POSIX"), minorDigits, amount)
+    }
+    var menuItems: [String] {
+        ["备注：" + (note.isEmpty ? "（空）" : note),
+         "金额：" + amountText + " " + currency, "结束测试（不保存）"]
+    }
+    var summary: String {
+        "AI 草稿预填测试结束，未保存账单。\n备注：" + (note.isEmpty ? "（空）" : note) + "\n金额：" + amountText + " " + currency
+    }
+}
+
+@available(iOS 16.0, *)
+@MainActor
+enum ShortcutAIPrefillProbe {
+    static func entity(from draft: [String: Any]) throws -> ShortcutAIDraftProbeEntity {
+        guard draft["status"] as? String == "draft",
+              let candidates = draft["candidates"] as? [[String: Any]], !candidates.isEmpty else {
+            throw ShortcutBillingError(message: "AI 未返回有效草稿；未保存账单")
+        }
+        guard candidates.count == 1 else {
+            throw ShortcutBillingError(message: "本次预填测试仅支持单笔，AI 识别出多笔；未取首笔，也未保存账单")
+        }
+        let candidate = candidates[0]
+        let options = draft["options"] as? [String: Any] ?? [:]
+        guard candidate["blocked"] as? Bool != true,
+              let currency = draft["currency"] as? String, !currency.isEmpty,
+              let digits = options["minorDigits"] as? Int, (0...4).contains(digits),
+              let minor = candidate["amountMinor"] as? Int, minor > 0, minor <= 999999999999,
+              let note = candidate["note"] as? String, note.count <= 10000 else {
+            throw ShortcutBillingError(message: "金额、备注或币种无效，请核对识别结果；未保存账单")
+        }
+        let scale = Double([1, 10, 100, 1000, 10000][digits])
+        return ShortcutAIDraftProbeEntity(note: note, amount: Double(minor) / scale, currency: currency, minorDigits: digits)
+    }
+
+    static func recognize(image: IntentFile?, text: String?, ledger: BillingLedger?,
+                          call: ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call,
+                          recognizeImage: (IntentFile, String) async throws -> [String: Any] = {
+                              try await ConfirmedBilling.recognizeImage($0, ocr: false, configuration: $1)
+                          }) async throws -> ShortcutAIDraftProbeEntity {
+        let source = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (image != nil) != !source.isEmpty else {
+            throw ShortcutBillingError(message: "请只连接图片或文字其中一种输入；未保存账单")
+        }
+        var config: [String: Any] = [:]
+        if let ledger { config["ledgerId"] = ledger.id }
+        let options = try await call(config.merging(["operation": "options"]) { _, new in new })
+        guard let ledgerId = options["ledgerId"] as? Int else {
+            throw ShortcutBillingError(message: "当前账本无效，请先在 App 中选择账本；未保存账单")
+        }
+        config["ledgerId"] = ledgerId
+        let draft: [String: Any]
+        if let image {
+            draft = try await recognizeImage(image, ConfirmedBilling.encode(config))
+        } else {
+            config["operation"] = "recognize"; config["mode"] = "text"; config["text"] = source
+            config["timeZoneOffsetSeconds"] = TimeZone.current.secondsFromGMT()
+            draft = try await call(config)
+        }
+        return try entity(from: draft)
+    }
+
+    static func checkedAmount(_ value: Double, digits: Int) throws -> Double {
+        guard (0...4).contains(digits), value.isFinite, value > 0 else {
+            throw ShortcutBillingError(message: "测试金额必须大于零；未保存账单")
+        }
+        let minor = value * Double([1, 10, 100, 1000, 10000][digits])
+        guard minor <= 999999999999, abs(minor - minor.rounded()) < 0.001 else {
+            throw ShortcutBillingError(message: "测试金额超出范围或小数位数，未保存账单")
+        }
+        return value
+    }
+
+    static func initialState(draft: ShortcutAIDraftProbeEntity, note: String?, amount: Double?) throws -> ShortcutAIPrefillProbeState {
+        // An entity parameter alone is insufficient: these scalar slots must be
+        // bound by Shortcuts BEFORE perform(), not assigned from draft here.
+        guard (0...4).contains(draft.minorDigits), !draft.currency.isEmpty,
+              let initialNote = note ?? (draft.note.isEmpty ? "" : nil),
+              let initialAmount = amount else {
+            throw ShortcutBillingError(message: "请将上一步草稿的备注、金额属性分别连接到此动作的备注、金额参数；未保存账单")
+        }
+        guard initialNote == draft.note, abs(initialAmount - draft.amount) < 0.00001 else {
+            throw ShortcutBillingError(message: "备注或金额与草稿不一致，请选择同一草稿变量的对应属性；未保存账单")
+        }
+        return ShortcutAIPrefillProbeState(note: initialNote,
+            amount: try checkedAmount(initialAmount, digits: draft.minorDigits),
+            currency: draft.currency, minorDigits: draft.minorDigits)
+    }
+
+    static func run(initial: ShortcutAIPrefillProbeState,
+                    choose: ([String], String) async throws -> String,
+                    editNote: (String) async throws -> String,
+                    editAmount: (Double) async throws -> Double) async throws -> ShortcutAIPrefillProbeState {
+        var state = initial
+        while true {
+            let items = state.menuItems
+            let selected = try await choose(items, "确认 AI 草稿（测试，不保存）")
+            switch items.firstIndex(of: selected) {
+            case 0: state.note = try await editNote(state.note)
+            case 1: state.amount = try checkedAmount(await editAmount(state.amount), digits: state.minorDigits)
+            case 2: return state
+            default: throw ShortcutBillingError(message: "测试选项已失效；未保存账单")
+            }
+        }
+    }
+}
+
+@available(iOS 16.0, *)
+struct RecognizeAIDraftProbeIntent: AppIntent {
+    static var isDiscoverable = true
+    static var title: LocalizedStringResource = "AI识别草稿（测试，不记账）"
+    static var description: LocalizedStringResource = "仅识别单笔图片或文字，使用 App 内配置的 AI，输出可通过变量选取的备注和金额；图片会发送给配置的视觉服务。本动作不保存账单。"
+    static var openAppWhenRun = false
+    @Parameter(title: "图片") var image: IntentFile?
+    @Parameter(title: "文字") var text: String?
+    @Parameter(title: "账本（留空使用当前账本）") var ledger: BillingLedger?
+    static var parameterSummary: some ParameterSummary {
+        Summary("AI 识别草稿（不记账）") { \.$image; \.$text; \.$ledger }
+    }
+    @MainActor
+    func perform() async throws -> some IntentResult & ReturnsValue<ShortcutAIDraftProbeEntity> {
+        .result(value: try await ShortcutAIPrefillProbe.recognize(image: image, text: text, ledger: ledger))
+    }
+}
+
+@available(iOS 16.0, *)
+struct ConfirmAIDraftProbeIntent: AppIntent {
+    static var isDiscoverable = true
+    static var title: LocalizedStringResource = "确认AI草稿（测试，不保存）"
+    static var description: LocalizedStringResource = "把同一个上一步 AI 草稿及其备注、金额属性分别连接到三个参数。菜单显示传入值，点字段测试原值及连续编辑。本动作不调用 AI、不保存账单。"
+    static var openAppWhenRun = false
+    @Parameter(title: "AI 草稿") var draft: ShortcutAIDraftProbeEntity
+    @Parameter(title: "备注", inputOptions: String.IntentInputOptions(multiline: true), inputConnectionBehavior: .never) var note: String?
+    @Parameter(title: "金额", inputConnectionBehavior: .never) var amount: Double?
+    @Parameter(title: "测试菜单", inputConnectionBehavior: .never) var choice: String?
+    static var parameterSummary: some ParameterSummary {
+        Summary("确认 \(\.$draft)（不保存）") { \.$note; \.$amount }
+    }
+    @MainActor
+    func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+        let initial = try ShortcutAIPrefillProbe.initialState(draft: draft, note: note, amount: amount)
+        let final = try await ShortcutAIPrefillProbe.run(initial: initial, choose: { items, prompt in
+            choice = nil
+            return try await $choice.requestDisambiguation(among: items, dialog: IntentDialog(stringLiteral: prompt))
+        }, editNote: { current in
+            // Keep the same declared, pre-bound slot for every edit. Do not nil it.
+            note = current
+            return try await $note.requestValue("修改备注：可在 AI 原文基础上增删")
+        }, editAmount: { current in
+            amount = current
+            return try await $amount.requestValue("修改金额：请核对 AI 识别的原金额")
+        })
+        return .result(value: final.summary, dialog: IntentDialog(stringLiteral: final.summary))
+    }
+}
+
 #endif

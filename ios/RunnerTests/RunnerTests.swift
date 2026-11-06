@@ -1420,4 +1420,92 @@ class RunnerTests: XCTestCase {
     }
   }
 
+  @available(iOS 16.0, *)
+  @MainActor
+  private func aiPrefillDraft(minor: Int = 12345, digits: Int = 2) -> [String: Any] {
+    ["status": "draft", "currency": "CNY", "options": ["minorDigits": digits],
+     "candidates": [["note": "AI 原文\n第二行", "amountMinor": minor, "blocked": false]]]
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testAIPrefillUsesBoundScalarValuesAndRealCurrencyPrecision() throws {
+    let entity = try ShortcutAIPrefillProbe.entity(from: aiPrefillDraft())
+    XCTAssertEqual(entity.note, "AI 原文\n第二行")
+    XCTAssertEqual(entity.amount, 123.45, accuracy: 0.00001)
+    let initial = try ShortcutAIPrefillProbe.initialState(draft: entity, note: entity.note, amount: entity.amount)
+    XCTAssertEqual(initial.menuItems, ["备注：AI 原文\n第二行", "金额：123.45 CNY", "结束测试（不保存）"])
+    XCTAssertThrowsError(try ShortcutAIPrefillProbe.initialState(draft: entity, note: nil, amount: entity.amount))
+    XCTAssertThrowsError(try ShortcutAIPrefillProbe.initialState(draft: entity, note: entity.note, amount: nil))
+    XCTAssertThrowsError(try ShortcutAIPrefillProbe.initialState(draft: entity, note: "错误变量", amount: 12.34))
+    let threeDigits = try ShortcutAIPrefillProbe.entity(from: aiPrefillDraft(minor: 12345, digits: 3))
+    let initialThree = try ShortcutAIPrefillProbe.initialState(draft: threeDigits, note: threeDigits.note, amount: threeDigits.amount)
+    XCTAssertEqual(initialThree.amountText, "12.345")
+    XCTAssertThrowsError(try ShortcutAIPrefillProbe.checkedAmount(1.234, digits: 2))
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testAIPrefillRejectsMultipleBillsMissingAmountsAndBlockedCurrency() throws {
+    var multi = aiPrefillDraft()
+    multi["candidates"] = [["note": "一", "amountMinor": 100], ["note": "二", "amountMinor": 200]]
+    XCTAssertThrowsError(try ShortcutAIPrefillProbe.entity(from: multi))
+    var invalid = aiPrefillDraft()
+    invalid["candidates"] = [["note": "原文"]]
+    XCTAssertThrowsError(try ShortcutAIPrefillProbe.entity(from: invalid))
+    invalid["candidates"] = [["note": "原文", "amountMinor": 100, "blocked": true]]
+    XCTAssertThrowsError(try ShortcutAIPrefillProbe.entity(from: invalid))
+    invalid = aiPrefillDraft(digits: 5)
+    XCTAssertThrowsError(try ShortcutAIPrefillProbe.entity(from: invalid))
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testAIProbeOnlyRequestsOptionsAndRecognitionNeverCommit() async throws {
+    var operations: [String] = []
+    let entity = try await ShortcutAIPrefillProbe.recognize(image: nil, text: " 示例文字 ", ledger: nil, call: { request in
+      let op = request["operation"] as? String ?? ""
+      operations.append(op)
+      if op == "options" { return ["ledgerId": 7] }
+      XCTAssertEqual(op, "recognize")
+      XCTAssertEqual(request["ledgerId"] as? Int, 7)
+      XCTAssertEqual(request["text"] as? String, "示例文字")
+      XCTAssertEqual(request["mode"] as? String, "text")
+      XCTAssertNil(request["imagePath"])
+      return self.aiPrefillDraft()
+    }, recognizeImage: { _, _ in
+      XCTFail("Text recognition must never upload an image"); return [:]
+    })
+    XCTAssertEqual(operations, ["options", "recognize"])
+    XCTAssertEqual(entity.note, "AI 原文\n第二行")
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testAIPrefillRepeatedEditsUseLatestValuesIncludingEmptyNote() async throws {
+    let entity = try ShortcutAIPrefillProbe.entity(from: aiPrefillDraft())
+    let initial = try ShortcutAIPrefillProbe.initialState(draft: entity, note: entity.note, amount: entity.amount)
+    var actions = [0, 0, 1, 1, 2]
+    var notes = ["AI 原文\n第二行", "追加备注"]
+    var amounts = [123.45, 45.67]
+    let final = try await ShortcutAIPrefillProbe.run(initial: initial, choose: { items, _ in
+      return items[actions.removeFirst()]
+    }, editNote: { current in
+      XCTAssertEqual(current, notes.removeFirst())
+      return notes.isEmpty ? "" : notes[0]
+    }, editAmount: { current in
+      XCTAssertEqual(current, amounts.removeFirst(), accuracy: 0.00001)
+      return amounts.isEmpty ? 56.78 : amounts[0]
+    })
+    XCTAssertEqual(final.note, "")
+    XCTAssertEqual(final.amount, 56.78, accuracy: 0.00001)
+    XCTAssertTrue(final.menuItems.contains("备注：（空）"))
+    XCTAssertTrue(final.summary.contains("未保存账单"))
+    XCTAssertTrue(actions.isEmpty && notes.isEmpty && amounts.isEmpty)
+    XCTAssertTrue(RecognizeAIDraftProbeIntent.isDiscoverable)
+    XCTAssertTrue(ConfirmAIDraftProbeIntent.isDiscoverable)
+    XCTAssertFalse(RecognizeAIDraftProbeIntent.openAppWhenRun)
+    XCTAssertFalse(ConfirmAIDraftProbeIntent.openAppWhenRun)
+  }
+
 }
