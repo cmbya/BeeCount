@@ -1564,4 +1564,111 @@ struct TextConfirmBillingIntent: AppIntent {
     }
 }
 
+
+// MARK: - Isolated runtime-prefill probe (no AI, bridge or bill persistence)
+
+/// Only the current perform() owns this sample state. A new run starts fresh.
+/// Kept separate so mocked state tests cannot be mistaken for system-UI tests.
+struct ShortcutInputPrefillProbeState {
+    var note = "广东电网｜生活缴费"
+    var amount = 12.34
+
+    var amountText: String {
+        String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), amount)
+    }
+    var menuItems: [String] {
+        ["备注：" + (note.isEmpty ? "（空）" : note),
+         "金额：" + amountText, "结束测试（不保存）"]
+    }
+    var summary: String {
+        "测试结束，未记账。\n备注：" + (note.isEmpty ? "（空）" : note) + "\n金额：" + amountText
+    }
+}
+
+@available(iOS 16.0, *)
+@MainActor
+enum ShortcutInputPrefillProbe {
+    static func run(choose: ([String], String) async throws -> String,
+                    editNote: (String) async throws -> String,
+                    editAmount: (Double) async throws -> Double) async throws -> ShortcutInputPrefillProbeState {
+        var state = ShortcutInputPrefillProbeState()
+        while true {
+            let items = state.menuItems
+            let selected = try await choose(items, "输入预填测试（示例数据，不记账）")
+            switch items.firstIndex(of: selected) {
+            case 0:
+                // Preserve an intentionally empty note; do not fall back to the sample.
+                state.note = try await editNote(state.note)
+            case 1:
+                state.amount = try await editAmount(state.amount)
+            case 2:
+                return state
+            default:
+                throw ShortcutBillingError(message: "测试选项已失效，请重新运行；未记账")
+            }
+        }
+    }
+}
+
+@available(iOS 16.0, *)
+struct ShortcutInputPrefillProbeIntent: AppIntent {
+    static var isDiscoverable = true
+    static var title: LocalizedStringResource = "输入预填测试（不记账）"
+    static var description: LocalizedStringResource = "只用固定示例测试运行菜单中的备注和金额预填、连续编辑及取消；不调用 AI、不读写账单、不打开 App。"
+    static var openAppWhenRun = false
+
+    // Optional slots prevent required-parameter resolution before perform().
+    // .never prevents a preceding Shortcut action from supplying test values.
+    @Parameter(title: "测试备注", inputOptions: String.IntentInputOptions(multiline: true), inputConnectionBehavior: .never)
+    var editingNote: String?
+    @Parameter(title: "测试金额", inputConnectionBehavior: .never)
+    var editingAmount: Double?
+    @Parameter(title: "测试菜单", inputConnectionBehavior: .never)
+    var choice: String?
+
+    static var parameterSummary: some ParameterSummary {
+        Summary("测试备注和金额的运行时预填（不记账）")
+    }
+
+    private static func trace(_ event: String) {
+        // Fixed stage labels only; never record note text or amount values.
+        NSLog("[ShortcutPrefillProbe] %@", event)
+    }
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
+        Self.trace("perform.started")
+        do {
+            let state = try await ShortcutInputPrefillProbe.run(choose: { items, prompt in
+                choice = nil
+                Self.trace("menu.requested")
+                let selected = try await $choice.requestDisambiguation(among: items, dialog: IntentDialog(stringLiteral: prompt))
+                Self.trace("menu.returned")
+                return selected
+            }, editNote: { current in
+                // This assignment is the experiment: does the host display the
+                // current wrappedValue as editable text when explicitly asked?
+                editingNote = current
+                Self.trace("note.requested")
+                let edited = try await $editingNote.requestValue("修改备注（测试）：请观察输入框是否带有原文")
+                Self.trace("note.returned")
+                return edited
+            }, editAmount: { current in
+                editingAmount = current
+                Self.trace("amount.requested")
+                let edited = try await $editingAmount.requestValue("修改金额（测试）：请观察输入框是否带有原金额")
+                Self.trace("amount.returned")
+                return edited
+            })
+            Self.trace("perform.finished")
+            return .result(value: state.summary, dialog: IntentDialog(stringLiteral: state.summary))
+        } catch {
+            Self.trace(error is CancellationError ? "perform.cancelled" : "perform.error code=" + String((error as NSError).code))
+            // Do not translate an AppIntent error or restart perform(); both can
+            // change the very system behavior this isolated probe is testing.
+            throw error
+        }
+    }
+}
+
 #endif

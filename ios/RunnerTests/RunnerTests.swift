@@ -1353,4 +1353,71 @@ class RunnerTests: XCTestCase {
     XCTAssertTrue(choices.isEmpty)
   }
 
+  // These tests cover sample-state transport, not the Shortcuts host's UI.
+  @available(iOS 16.0, *)
+  func testPrefillProbeIsDiscoverableAndUsesOnlySampleValues() {
+    XCTAssertTrue(ShortcutInputPrefillProbeIntent.isDiscoverable)
+    XCTAssertFalse(ShortcutInputPrefillProbeIntent.openAppWhenRun)
+    let intent = ShortcutInputPrefillProbeIntent()
+    XCTAssertNil(intent.editingNote)
+    XCTAssertNil(intent.editingAmount)
+    XCTAssertNil(intent.choice)
+    let state = ShortcutInputPrefillProbeState()
+    XCTAssertEqual(state.note, "广东电网｜生活缴费")
+    XCTAssertEqual(state.amount, 12.34)
+    XCTAssertEqual(state.menuItems, ["备注：广东电网｜生活缴费", "金额：12.34", "结束测试（不保存）"])
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testPrefillProbePassesLatestValuesAndPreservesEmptyNote() async throws {
+    var actions = [0, 0, 0, 1, 1, 2]
+    var noteInputs = ["广东电网｜生活缴费 追加", "", "重新填写"]
+    var previousNotes = ["广东电网｜生活缴费", "广东电网｜生活缴费 追加", ""]
+    var amountInputs = [56.78, 9.01]
+    var previousAmounts = [12.34, 56.78]
+    var sawEmptyNote = false
+    var sawLatestAmount = false
+    let final = try await ShortcutInputPrefillProbe.run(choose: { items, _ in
+      sawEmptyNote = sawEmptyNote || items.contains("备注：（空）")
+      sawLatestAmount = sawLatestAmount || items.contains("金额：56.78")
+      return items[actions.removeFirst()]
+    }, editNote: { current in
+      XCTAssertEqual(current, previousNotes.removeFirst())
+      return noteInputs.removeFirst()
+    }, editAmount: { current in
+      XCTAssertEqual(current, previousAmounts.removeFirst(), accuracy: 0.00001)
+      return amountInputs.removeFirst()
+    })
+    XCTAssertTrue(sawEmptyNote)
+    XCTAssertTrue(sawLatestAmount)
+    XCTAssertEqual(final.note, "重新填写")
+    XCTAssertEqual(final.amount, 9.01, accuracy: 0.00001)
+    XCTAssertTrue(final.summary.contains("未记账"))
+    XCTAssertTrue(actions.isEmpty)
+    XCTAssertTrue(noteInputs.isEmpty && previousNotes.isEmpty)
+    XCTAssertTrue(amountInputs.isEmpty && previousAmounts.isEmpty)
+    XCTAssertEqual(ShortcutInputPrefillProbeState().note, "广东电网｜生活缴费", "New runs must not inherit old edits")
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testPrefillProbePropagatesCancellationWithoutRestarting() async throws {
+    var menus = 0
+    do {
+      _ = try await ShortcutInputPrefillProbe.run(choose: { items, _ in
+        menus += 1
+        return items[0]
+      }, editNote: { _ in
+        throw CancellationError()
+      }, editAmount: { _ in
+        XCTFail("Cancellation must not continue to another field")
+        return 0
+      })
+      XCTFail("Expected cancellation")
+    } catch is CancellationError {
+      XCTAssertEqual(menus, 1)
+    }
+  }
+
 }
