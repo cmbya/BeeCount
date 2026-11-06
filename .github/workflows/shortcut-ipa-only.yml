@@ -1,0 +1,88 @@
+name: iOS IPA Only
+run-name: "IPA only · Build ${{ inputs.build_number }}"
+
+# Opt-in packaging for a user-requested build without test jobs.
+# Kept separate so full test/publish workflow behavior is not weakened.
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Source commit or ref to package"
+        required: true
+        type: string
+        default: "89d395b42762a60bf53d28e6db9a5fca529e4f05"
+      build_number:
+        description: "CFBundleVersion for the unsigned app"
+        required: true
+        type: string
+        default: "17"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-ipa-only-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: "3.27.3"
+  CI: "true"
+
+jobs:
+  ipa-only:
+    name: Build IPA only (no tests)
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Cache pub dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: shortcut-pub-${{ runner.os }}-${{ runner.arch }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('pubspec.lock', '**/pubspec.yaml') }}
+          restore-keys: |
+            shortcut-pub-${{ runner.os }}-${{ runner.arch }}-${{ env.FLUTTER_VERSION }}-
+      - name: Cache CocoaPods downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/CocoaPods
+            ~/.cocoapods
+          key: shortcut-pods-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ios/Podfile', 'ios/Podfile.lock', 'pubspec.lock') }}
+          restore-keys: |
+            shortcut-pods-${{ runner.os }}-${{ runner.arch }}-
+      - name: Get dependencies
+        run: flutter pub get
+      - name: Build unsigned iOS app
+        env:
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        run: flutter build ios --release --no-pub --no-codesign --build-name=3.9.0 --build-number="$BUILD_NUMBER"
+      - name: Package unsigned IPA for personal signing
+        run: |
+          set -euo pipefail
+          mkdir -p build/shortcut-package/Payload
+          cp -R build/ios/iphoneos/Runner.app build/shortcut-package/Payload/
+          cd build/shortcut-package
+          zip -qry BeeCount-shortcut-unsigned.ipa Payload
+      - name: Upload unsigned IPA immediately
+        uses: actions/upload-artifact@v4
+        with:
+          name: BeeCount-shortcut-unsigned
+          path: build/shortcut-package/BeeCount-shortcut-unsigned.ipa
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Build summary
+        if: always()
+        run: |
+          echo "### IPA-only build" >> "$GITHUB_STEP_SUMMARY"
+          echo "Source: ${{ inputs.source_ref }}; Build: ${{ inputs.build_number }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Unsigned IPA only. Tests, lint, simulator checks and package verification intentionally not run. No Release publication. Device acceptance is not verified." >> "$GITHUB_STEP_SUMMARY"
