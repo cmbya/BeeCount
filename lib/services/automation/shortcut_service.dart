@@ -134,6 +134,8 @@ class ShortcutService {
                     ? c.name
                     : (names[c.parentId] ?? '') + '/' + c.name,
                 'leafName': c.name,
+                'parentId': c.parentId,
+                'parentName': c.parentId == null ? null : names[c.parentId],
                 'kind': c.kind,
               })
           .toList(),

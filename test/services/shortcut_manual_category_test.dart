@@ -115,4 +115,22 @@ void main() {
       'type': 'expense', 'note': 42});
     expect(invalid['code'], 'INVALID_REQUEST');
   });
+
+  test('options expose only usable child IDs with parent metadata for two-level selection', () async {
+    final food = await repo.createCategory(name: '食品', kind: 'expense', level: 2, parentId: dining);
+    final response = await service.handle({'operation': 'options', 'ledgerId': ledger, 'type': 'expense'});
+    expect(response['status'], 'ok');
+    final categories = (response['categories'] as List).cast<Map<String, dynamic>>();
+    final child = categories.singleWhere((row) => row['id'] == food);
+    expect(child['name'], '餐饮/食品');
+    expect(child['leafName'], '食品');
+    expect(child['parentId'], dining);
+    expect(child['parentName'], '餐饮');
+    expect(categories.any((row) => row['id'] == dining), isFalse,
+        reason: 'A parent with children is a selector group, not a valid transaction category');
+    final unrelated = categories.singleWhere((row) => row['id'] == personal);
+    expect(unrelated['parentId'], isNull);
+    expect(unrelated['parentName'], isNull);
+  });
+
 }

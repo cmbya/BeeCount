@@ -83,13 +83,15 @@ class RunnerTests: XCTestCase {
 
   @available(iOS 17.0, *)
   @MainActor
-  func testOnlyImageAndTextBillingActionsAreDiscoverable() {
-    XCTAssertTrue(ImageConfirmBillingIntent.isDiscoverable)
-    XCTAssertTrue(TextConfirmBillingIntent.isDiscoverable)
+  func testOnlyPrepareAndConfirmVariableActionsAreDiscoverable() {
+    XCTAssertTrue(PrepareVariableBillingIntent.isDiscoverable)
+    XCTAssertTrue(ConfirmVariableBillingIntent.isDiscoverable)
+    XCTAssertFalse(ImageConfirmBillingIntent.isDiscoverable)
+    XCTAssertFalse(TextConfirmBillingIntent.isDiscoverable)
     XCTAssertFalse(BillingValueInputIntent.isDiscoverable)
     XCTAssertFalse(AutoBillingAppIntent.isDiscoverable)
-    XCTAssertFalse(ImageConfirmBillingIntent.openAppWhenRun)
-    XCTAssertFalse(TextConfirmBillingIntent.openAppWhenRun)
+    XCTAssertFalse(PrepareVariableBillingIntent.openAppWhenRun)
+    XCTAssertFalse(ConfirmVariableBillingIntent.openAppWhenRun)
     XCTAssertEqual(AutoBillingShortcuts.appShortcuts.count, 2)
   }
 
@@ -1276,6 +1278,378 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(entries.compactMap { $0["amountMinor"] as? Int }, [8000, 22000])
     XCTAssertEqual(submission["originalAmountMinor"] as? Int, 30000)
     XCTAssertTrue(inputs.isEmpty)
+    XCTAssertTrue(choices.isEmpty)
+  }
+
+
+  // Variable billing regressions exercise the same two-action orchestration as perform().
+  // Mock input proves state/save semantics, not Shortcuts keyboard presentation.
+  @available(iOS 16.0, *)
+  @MainActor
+  private func variableBill(amount: String? = "300", type: String = "支出", category: String? = "食品",
+                            tag: String? = "个人", account: Int? = 1, date: Date? = Date(timeIntervalSince1970: 1793853165),
+                            note: String = "原备注", excluded: String? = "是", originalText: String = "原始付款文本") async throws -> VariableBillingDraft {
+    try await VariableBillingFlow.prepare(amount: amount, type: type, ledgerId: 1, category: category, tag: tag,
+        accountId: account, sourceAccountId: 1, destinationAccountId: 2, date: date, note: note, excluded: excluded,
+        originalText: originalText, screenshot: nil, call: { request in
+          XCTAssertNotEqual(request["operation"] as? String, "recognize")
+          if request["operation"] as? String == "classify" { return ["categoryId": 11] }
+          return self.variableOptions(request["type"] as? String ?? "expense", ledger: request["ledgerId"] as? Int ?? 1)
+        })
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  private func variableOptions(_ type: String = "expense", ledger: Int = 1) -> [String: Any] {
+    var result = editorOptions(type, ledger: ledger)
+    let categories: [[String: Any]] = type == "expense" ? [["id": 11, "name": "餐饮/食品", "leafName": "食品", "parentId": 10, "parentName": "餐饮"],
+        ["id": 12, "name": "餐饮/饮料", "leafName": "饮料", "parentId": 10, "parentName": "餐饮"]] : type == "income" ? [["id": 20, "name": "工资", "leafName": "工资"]] : []
+    result["categories"] = categories
+    return result
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariablePreparationMapsBareChildAndPreservesActualValuesWithoutCommit() async throws {
+    var operations: [String] = []
+    let image = IntentFile(data: Data([1, 2, 3]), filename: "payment.png", type: .png)
+    let time = Date(timeIntervalSince1970: 1793853165)
+    let bill = try await VariableBillingFlow.prepare(amount: "12.30", type: "支出", ledgerId: 1, category: "食品", tag: "个人",
+        accountId: 1, sourceAccountId: 2, destinationAccountId: 2, date: time, note: "实际备注文字", excluded: "是",
+        originalText: "不能覆盖备注的原文", screenshot: image, call: { request in
+          operations.append(request["operation"] as? String ?? "")
+          return self.variableOptions()
+        })
+    let object = try ConfirmedBilling.decode(bill.payload)
+    XCTAssertEqual(operations, ["options"])
+    XCTAssertEqual(object["amountMinor"] as? Int, 1230)
+    XCTAssertEqual(object["categoryId"] as? Int, 11, "Bare child name must save its own ID, not its parent")
+    XCTAssertEqual(object["tagIds"] as? [Int], [3])
+    XCTAssertEqual(object["excludeFromBudget"] as? Bool, true)
+    XCTAssertEqual(object["accountId"] as? Int, 1)
+    XCTAssertNil(object["toAccountId"])
+    XCTAssertEqual(object["note"] as? String, "实际备注文字")
+    XCTAssertEqual(object["occurredAt"] as? String, ISO8601DateFormatter().string(from: time))
+    XCTAssertEqual(bill.screenshot?.data, image.data)
+    XCTAssertFalse(bill.payload.contains("dataBase64"))
+    XCTAssertNil(object["confirmed"])
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableAmbiguousNamesStayPendingAndNeverApplyRulesOverExplicitName() async throws {
+    var options = variableOptions()
+    var categories = options["categories"] as! [[String: Any]]
+    categories.append(["id": 31, "name": "购物/食品", "leafName": "食品", "parentId": 30, "parentName": "购物"])
+    options["categories"] = categories
+    for name in ["食品", "不存在分类"] {
+      let bill = try await VariableBillingFlow.prepare(amount: "1", type: "支出", ledgerId: 1, category: name, tag: "不存在标签",
+          accountId: 1, sourceAccountId: nil, destinationAccountId: nil, date: nil, note: "规则命中也不能覆盖指定分类",
+          excluded: "不是合法的是或否", originalText: "", screenshot: nil, call: { request in
+            XCTAssertEqual(request["operation"] as? String, "options")
+            return options
+          })
+      let object = try ConfirmedBilling.decode(bill.payload)
+      XCTAssertNil(object["categoryId"])
+      XCTAssertEqual(object["pendingCategory"] as? String, name)
+      XCTAssertNotNil(object["pendingTag"])
+      XCTAssertNotNil(object["pendingBudget"])
+      XCTAssertNil(object["occurredAt"], "Missing time must not be silently replaced with now")
+    }
+    XCTAssertEqual(VariableBillingFlow.categoryMatches("餐饮/食品", options: categories).first?["id"] as? Int, 11)
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableEmptyCategoryUsesLocalRulesOnlyAndExplicitCategoryNeverDoes() async throws {
+    var operations: [String] = []
+    let bill = try await VariableBillingFlow.prepare(amount: "1", type: "收入", ledgerId: 1, category: nil, tag: nil,
+        accountId: 1, sourceAccountId: nil, destinationAccountId: nil, date: nil, note: "实际工资说明", excluded: "否",
+        originalText: "工资到账", screenshot: nil, call: { request in
+          operations.append(request["operation"] as? String ?? "")
+          if request["operation"] as? String == "classify" {
+            XCTAssertEqual(request["type"] as? String, "income")
+            XCTAssertEqual(request["note"] as? String, "实际工资说明")
+            XCTAssertEqual(request["ruleText"] as? String, "工资到账")
+            return ["categoryId": 20]
+          }
+          return self.variableOptions("income")
+        })
+    XCTAssertEqual(operations, ["options", "classify"])
+    XCTAssertEqual(try ConfirmedBilling.decode(bill.payload)["categoryId"] as? Int, 20)
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableRepeatedAmountNoteEditsAndTagCyclesSaveOnlyLatestValues() async throws {
+    let bill = try await variableBill()
+    var actions = ["金额", "备注", "金额", "备注", "标签", "标签", "标签", "不计预算", "否", "分类", "1. 餐饮", "2. 餐饮/饮料", "确认提交"]
+    var numbers = ["12.34", "23.45"]
+    var notes = ["修改备注", "最终实际备注"]
+    var commits = 0
+    var sawFinal = false
+    let outcome = try await VariableBillingFlow.review(bill, choose: { values, _ in
+      if values.contains("确认提交") {
+        XCTAssertFalse(values.contains { $0.contains("拆分") || $0.contains("不计收入") })
+        if values.contains("金额：23.45 CNY") && values.contains("备注：最终实际备注") && values.contains("标签：家庭") && values.contains("不计预算：否") { sawFinal = true }
+      }
+      let desired = actions.removeFirst()
+      let selected = values.first { $0 == desired || $0.hasPrefix(desired + "：") || $0 == "✓ " + desired } ?? desired
+      XCTAssertTrue(values.contains(selected), selected)
+      return selected
+    }, readAmount: { _, _ in numbers.removeFirst() }, readNote: { current in
+      XCTAssertEqual(current, notes.count == 2 ? "原备注" : "修改备注")
+      return notes.removeFirst()
+    }, readDate: { _ in XCTFail("No date edit"); return Date() }, call: { request in
+      XCTAssertNotEqual(request["operation"] as? String, "recognize")
+      return request["operation"] as? String == "validate" ? ["status": "valid"] : self.variableOptions()
+    }, commit: { submission, attachment in
+      commits += 1
+      XCTAssertTrue(actions.isEmpty)
+      XCTAssertTrue(sawFinal)
+      XCTAssertEqual(submission["requestId"] as? String, try ConfirmedBilling.decode(bill.payload)["requestId"] as? String)
+      let entry = try XCTUnwrap((submission["entries"] as? [[String: Any]])?.first)
+      XCTAssertEqual(entry["amountMinor"] as? Int, 2345)
+      XCTAssertEqual(entry["categoryId"] as? Int, 12)
+      XCTAssertEqual(entry["note"] as? String, "最终实际备注")
+      XCTAssertEqual(entry["tagIds"] as? [Int], [4])
+      XCTAssertEqual(entry["excludeFromBudget"] as? Bool, false)
+      XCTAssertNil(entry["excludeFromStats"])
+      XCTAssertNil(attachment)
+      return try ConfirmedBilling.encode(["status": "committed", "count": 1, "totalAmountMinor": 2345])
+    })
+    XCTAssertEqual(commits, 1)
+    XCTAssertEqual(try ConfirmedBilling.decode(outcome.value)["status"] as? String, "committed")
+    XCTAssertTrue(actions.isEmpty)
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableInvalidAmountAndCancelledNoteKeepPreviousValuesThenAllowEmptyNote() async throws {
+    let bill = try await variableBill()
+    var actions = ["金额", "返回账单", "备注", "备注", "确认提交"]
+    var noteCalls = 0
+    _ = try await VariableBillingFlow.review(bill, choose: { values, _ in
+      let desired = actions.removeFirst()
+      return self.menuValue(desired, values)
+    }, readAmount: { _, _ in "1.001" }, readNote: { _ in
+      noteCalls += 1
+      if noteCalls == 1 { throw CancellationError() }
+      return ""
+    }, readDate: { _ in Date() }, call: { request in
+      request["operation"] as? String == "validate" ? ["status": "valid"] : self.variableOptions()
+    }, commit: { submission, _ in
+      let entry = try XCTUnwrap((submission["entries"] as? [[String: Any]])?.first)
+      XCTAssertEqual(entry["amountMinor"] as? Int, 30000)
+      XCTAssertEqual(entry["note"] as? String, "")
+      return try ConfirmedBilling.encode(["status": "committed"])
+    })
+    XCTAssertEqual(noteCalls, 2)
+    XCTAssertTrue(actions.isEmpty)
+    XCTAssertThrowsError(try VariableBillingFlow.amountText(1.001, digits: 2))
+    XCTAssertEqual(try VariableBillingFlow.amountText(12.30, digits: 2), "12.3")
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableMissingFieldsShowReviewAndCannotSaveUntilFilled() async throws {
+    let bill = try await variableBill(amount: nil, account: nil, date: nil)
+    var actions = ["确认提交", "返回账单", "金额", "账户", "1. 支付宝", "时间", "确认提交"]
+    var first = true
+    _ = try await VariableBillingFlow.review(bill, choose: { values, _ in
+      if first {
+        XCTAssertTrue(values.contains("金额：待填写 CNY"))
+        XCTAssertTrue(values.contains("账户：待选择"))
+        XCTAssertTrue(values.contains("时间：待填写"))
+        first = false
+      }
+      return self.menuValue(actions.removeFirst(), values)
+    }, readAmount: { _, _ in "0.01" }, readNote: { _ in XCTFail(); return "" }, readDate: { current in
+      XCTAssertNil(current)
+      return Date(timeIntervalSince1970: 1793853165)
+    }, call: { request in request["operation"] as? String == "validate" ? ["status": "valid"] : self.variableOptions() }, commit: { submission, _ in
+      XCTAssertTrue(actions.isEmpty)
+      XCTAssertEqual(submission["originalAmountMinor"] as? Int, 1)
+      XCTAssertEqual(submission["accountId"] as? Int, 1)
+      return try ConfirmedBilling.encode(["status": "committed"])
+    })
+    XCTAssertTrue(actions.isEmpty)
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableCancelAndHostCancellationNeverValidateOrCommit() async throws {
+    for hostCancellation in [false, true] {
+      let prepared = try await variableBill()
+      let result = try await VariableBillingFlow.review(prepared, choose: { _, _ in
+        if hostCancellation { throw CancellationError() }
+        return "取消提交"
+      }, readAmount: { _, _ in XCTFail(); return "" }, readNote: { _ in XCTFail(); return "" }, readDate: { _ in XCTFail(); return Date() }, call: { request in
+        XCTAssertEqual(request["operation"] as? String, "options")
+        return self.variableOptions()
+      }, commit: { _, _ in XCTFail("Cancellation cannot save"); return "" })
+      XCTAssertEqual(try ConfirmedBilling.decode(result.value)["status"] as? String, "cancelled")
+    }
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableTransferUsesDedicatedAccountsAndOmitsCategoryAndBudget() async throws {
+    let bill = try await variableBill(type: "转账")
+    let object = try ConfirmedBilling.decode(bill.payload)
+    XCTAssertEqual(object["accountId"] as? Int, 1)
+    XCTAssertEqual(object["toAccountId"] as? Int, 2)
+    _ = try await VariableBillingFlow.review(bill, choose: { values, _ in
+      XCTAssertFalse(values.contains { $0.hasPrefix("账户：") || $0.hasPrefix("分类：") || $0.hasPrefix("不计预算：") })
+      XCTAssertTrue(values.contains("转出账户：支付宝"))
+      XCTAssertTrue(values.contains("转入账户：银行卡"))
+      return "确认提交"
+    }, readAmount: { _, _ in "" }, readNote: { _ in "" }, readDate: { _ in Date() }, call: { request in request["operation"] as? String == "validate" ? ["status": "valid"] : self.variableOptions("transfer") }, commit: { submission, _ in
+      XCTAssertEqual(submission["accountId"] as? Int, 1)
+      XCTAssertEqual(submission["toAccountId"] as? Int, 2)
+      let entry = try XCTUnwrap((submission["entries"] as? [[String: Any]])?.first)
+      XCTAssertNil(entry["categoryId"])
+      XCTAssertEqual(entry["excludeFromBudget"] as? Bool, false)
+      return try ConfirmedBilling.encode(["status": "committed"])
+    })
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableRetryUsesIdenticalFinalSubmissionAndQueriesOriginalID() async throws {
+    let bill = try await variableBill()
+    var commits: [String] = []
+    var queries = 0
+    _ = try await VariableBillingFlow.review(bill, choose: { values, _ in
+      values.contains("确认提交") ? "确认提交" : "查询并重试原账单"
+    }, readAmount: { _, _ in "" }, readNote: { _ in "" }, readDate: { _ in Date() }, call: { request in
+      switch request["operation"] as? String {
+      case "validate": return ["status": "valid"]
+      case "query": queries += 1; return ["status": "not_found"]
+      default: return self.variableOptions()
+      }
+    }, commit: { submission, _ in
+      commits.append(try ConfirmedBilling.encode(submission))
+      if commits.count == 1 { throw CocoaError(.fileWriteUnknown) }
+      return try ConfirmedBilling.encode(["status": "committed"])
+    })
+    XCTAssertEqual(queries, 1)
+    XCTAssertEqual(commits.count, 2)
+    XCTAssertEqual(commits.first, commits.last)
+  }
+
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableTypeAndLedgerEditsKeepLatestNoteAndRequireMatchingCategory() async throws {
+    let bill = try await variableBill()
+    var actions = ["备注", "账本", "2. 家庭", "类型", "收入", "分类", "1. 工资", "确认提交"]
+    _ = try await VariableBillingFlow.review(bill, choose: { values, _ in
+      let desired = actions.removeFirst()
+      let selected = values.first { $0 == desired || $0.hasPrefix(desired + "：") || $0 == "✓ " + desired } ?? desired
+      XCTAssertTrue(values.contains(selected), selected)
+      return selected
+    }, readAmount: { _, _ in XCTFail(); return "" }, readNote: { _ in "跨账本后也不能丢的备注" }, readDate: { _ in XCTFail(); return Date() }, call: { request in
+      if request["operation"] as? String == "validate" { return ["status": "valid"] }
+      XCTAssertEqual(request["operation"] as? String, "options", "Must never reclassify after manual editing")
+      return self.variableOptions(request["type"] as? String ?? "expense", ledger: request["ledgerId"] as? Int ?? 1)
+    }, commit: { submission, _ in
+      XCTAssertEqual(submission["ledgerId"] as? Int, 2)
+      XCTAssertEqual(submission["type"] as? String, "income")
+      let entry = try XCTUnwrap((submission["entries"] as? [[String: Any]])?.first)
+      XCTAssertEqual(entry["note"] as? String, "跨账本后也不能丢的备注")
+      XCTAssertEqual(entry["categoryId"] as? Int, 20)
+      XCTAssertEqual(entry["excludeFromBudget"] as? Bool, false)
+      return try ConfirmedBilling.encode(["status": "committed"])
+    })
+    XCTAssertTrue(actions.isEmpty)
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableCurrencyChangeNeverConvertsAmountSilently() async throws {
+    let bill = try await variableBill()
+    var actions = ["账本", "2. 家庭", "切换并重新填写金额", "金额", "确认提交"]
+    var newCurrency = false
+    _ = try await VariableBillingFlow.review(bill, choose: { values, _ in
+      if values.contains("确认提交") && newCurrency {
+        XCTAssertTrue(values.contains { $0.hasPrefix("金额：") && $0.hasSuffix(" JPY") })
+      }
+      let desired = actions.removeFirst()
+      return self.menuValue(desired, values)
+    }, readAmount: { current, digits in
+      XCTAssertEqual(current, "待填写")
+      XCTAssertEqual(digits, 0)
+      return "100"
+    }, readNote: { _ in XCTFail(); return "" }, readDate: { _ in XCTFail(); return Date() }, call: { request in
+      if request["operation"] as? String == "validate" { return ["status": "valid"] }
+      let ledger = request["ledgerId"] as? Int ?? 1
+      var options = self.variableOptions(ledger: ledger)
+      if ledger == 2 { options["currency"] = "JPY"; options["minorDigits"] = 0; newCurrency = true }
+      return options
+    }, commit: { submission, _ in
+      XCTAssertEqual(submission["currency"] as? String, "JPY")
+      XCTAssertEqual(submission["originalAmountMinor"] as? Int, 100)
+      XCTAssertEqual(submission["ledgerId"] as? Int, 2)
+      return try ConfirmedBilling.encode(["status": "committed"])
+    })
+    XCTAssertTrue(actions.isEmpty)
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableScreenshotTravelsWithEntityAndEntersOnlyConfirmedSubmission() async throws {
+    let renderer = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8))
+    let data = try XCTUnwrap(renderer.image { _ in UIColor.orange.setFill(); UIRectFill(CGRect(x: 0, y: 0, width: 8, height: 8)) }.pngData())
+    let image = IntentFile(data: data, filename: "payment.png", type: .png)
+    let prepared = try await variableBill()
+    let bill = VariableBillingDraft(payload: prepared.payload, screenshot: image)
+    var commits = 0
+    _ = try await VariableBillingFlow.review(bill, choose: { _, _ in "确认提交" }, readAmount: { _, _ in "" }, readNote: { _ in "" }, readDate: { _ in Date() }, call: { request in
+      if request["operation"] as? String == "validate" {
+        XCTAssertNil((request["submission"] as? [String: Any])?["attachment"], "Attachment not encoded before confirmation validation")
+        return ["status": "valid"]
+      }
+      return self.variableOptions()
+    }, commit: { submission, attachment in
+      commits += 1
+      XCTAssertNil(attachment, "Already encoded once, do not regenerate while retrying")
+      let payload = try XCTUnwrap(submission["attachment"] as? [String: Any])
+      let base64 = try XCTUnwrap(payload["dataBase64"] as? String)
+      XCTAssertNotNil(Data(base64Encoded: base64))
+      XCTAssertEqual((submission["entries"] as? [[String: Any]])?.count, 1)
+      return try ConfirmedBilling.encode(["status": "committed"])
+    })
+    XCTAssertEqual(commits, 1)
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableUnknownCommitStopsWithoutEditingOrChangingRequest() async throws {
+    let bill = try await variableBill()
+    var commits = 0
+    let outcome = try await VariableBillingFlow.review(bill, choose: { values, _ in
+      values.contains("确认提交") ? "确认提交" : "结束并稍后核对"
+    }, readAmount: { _, _ in "" }, readNote: { _ in "" }, readDate: { _ in Date() }, call: { request in request["operation"] as? String == "validate" ? ["status": "valid"] : self.variableOptions() }, commit: { _, _ in
+      commits += 1
+      throw CocoaError(.fileWriteUnknown)
+    })
+    XCTAssertEqual(commits, 1)
+    let result = try ConfirmedBilling.decode(outcome.value)
+    XCTAssertEqual(result["status"] as? String, "unknown")
+    XCTAssertEqual(result["requestId"] as? String, try ConfirmedBilling.decode(bill.payload)["requestId"] as? String)
+  }
+
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableReceiptForSameIDCannotBypassFinalContentConflict() async throws {
+    let bill = try await variableBill()
+    var choices = ["确认提交", "查询并重试原账单", "结束并稍后核对"]
+    var commits = 0
+    let outcome = try await VariableBillingFlow.review(bill, choose: { values, _ in
+      let selected = choices.removeFirst()
+      XCTAssertTrue(values.contains(selected))
+      return selected
+    }, readAmount: { _, _ in "" }, readNote: { _ in "" }, readDate: { _ in Date() }, call: { request in
+      switch request["operation"] as? String {
+      case "validate": return ["status": "valid"]
+      case "query": return ["status": "committed", "totalAmountMinor": 1]
+      default: return self.variableOptions()
+      }
+    }, commit: { _, _ in
+      commits += 1
+      throw CocoaError(.fileWriteFileExists)
+    })
+    XCTAssertEqual(commits, 2, "Must recheck canonical payload even if a receipt with this ID exists")
+    XCTAssertEqual(try ConfirmedBilling.decode(outcome.value)["status"] as? String, "unknown")
     XCTAssertTrue(choices.isEmpty)
   }
 
