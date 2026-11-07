@@ -7,20 +7,17 @@ import AppIntents
 class RunnerTests: XCTestCase {
   @available(iOS 16.0, *)
   @MainActor
-  func testRecognitionParametersOverrideConfigurationWithoutLosingDefaults() throws {
-    var intent = RecognizeConfirmBillingIntent()
-    intent.configuration = try ConfirmedBilling.encode(["tagIds": [3], "excludeFromBudget": true, "ledgerId": 1])
-    let inherited = try intent.recognitionConfiguration()
-    XCTAssertEqual(inherited["tagIds"] as? [Int], [3])
-    XCTAssertEqual(inherited["excludeFromBudget"] as? Bool, true)
-    intent.tags = [BillingTag(id: 4, name: "家庭"), BillingTag(id: 4, name: "家庭")]
-    intent.excluded = false
-    let overridden = try intent.recognitionConfiguration()
+  func testRecognitionParametersOverrideDefaultsWithoutLosingLedger() {
+    let inherited = RecognitionBillingFlow.configuration(ledger: BillingLedger(id: 1, name: "个人"), tags: nil, clearTags: false, excluded: nil)
+    XCTAssertNil(inherited["tagIds"])
+    XCTAssertNil(inherited["excludeFromBudget"])
+    XCTAssertEqual(inherited["ledgerId"] as? Int, 1)
+    let tags = [BillingTag(id: 4, name: "家庭"), BillingTag(id: 4, name: "家庭")]
+    let overridden = RecognitionBillingFlow.configuration(ledger: BillingLedger(id: 1, name: "个人"), tags: tags, clearTags: false, excluded: false)
     XCTAssertEqual(overridden["tagIds"] as? [Int], [4])
     XCTAssertEqual(overridden["excludeFromBudget"] as? Bool, false)
     XCTAssertEqual(overridden["ledgerId"] as? Int, 1)
-    intent.clearTags = true
-    XCTAssertEqual(try intent.recognitionConfiguration()["tagIds"] as? [Int], [])
+    XCTAssertEqual(RecognitionBillingFlow.configuration(ledger: nil, tags: tags, clearTags: true, excluded: nil)["tagIds"] as? [Int], [])
   }
 
   @available(iOS 16.0, *)
@@ -85,20 +82,15 @@ class RunnerTests: XCTestCase {
   }
 
   @available(iOS 17.0, *)
-  func testOnlyUserFacingBillingActionsAreDiscoverable() {
-    XCTAssertFalse(BillingOptionsIntent.isDiscoverable)
-    XCTAssertFalse(ImageBillingDraftIntent.isDiscoverable)
-    XCTAssertFalse(TextBillingDraftIntent.isDiscoverable)
-    XCTAssertFalse(BillingValueInputIntent.isDiscoverable)
-    XCTAssertFalse(TextBillingTemplateStartIntent.isDiscoverable)
-    XCTAssertFalse(EditBillingDraftIntent.isDiscoverable)
-    XCTAssertFalse(CommitConfirmedBillingIntent.isDiscoverable)
-    XCTAssertTrue(CustomExpenseBillingIntent.isDiscoverable)
-    XCTAssertTrue(CustomIncomeBillingIntent.isDiscoverable)
-    XCTAssertTrue(CustomTransferBillingIntent.isDiscoverable)
-    XCTAssertFalse(RecognizeConfirmBillingIntent.isDiscoverable)
+  @MainActor
+  func testOnlyImageAndTextBillingActionsAreDiscoverable() {
     XCTAssertTrue(ImageConfirmBillingIntent.isDiscoverable)
     XCTAssertTrue(TextConfirmBillingIntent.isDiscoverable)
+    XCTAssertFalse(BillingValueInputIntent.isDiscoverable)
+    XCTAssertFalse(AutoBillingAppIntent.isDiscoverable)
+    XCTAssertFalse(ImageConfirmBillingIntent.openAppWhenRun)
+    XCTAssertFalse(TextConfirmBillingIntent.openAppWhenRun)
+    XCTAssertEqual(AutoBillingShortcuts.appShortcuts.count, 2)
   }
 
   @available(iOS 16.0, *)
@@ -391,73 +383,9 @@ class RunnerTests: XCTestCase {
 
   @available(iOS 16.0, *)
   @MainActor
-  func testManualDraftPreservesSuppliedValuesWithoutRecognitionOrCommit() async throws {
-    for type in ["expense", "income", "transfer"] {
-      let date = Date(timeIntervalSince1970: 1793853165)
-      var operations: [String] = []
-      let draft = try await CustomBilling.draft(type: type,
-          ledger: BillingLedger(id: 2, name: "家庭"),
-          category: type == "transfer" ? nil : BillingCategory(id: 10, name: "自建"),
-          amount: "127.89", date: date, note: "我填写的备注；订单号也保留",
-          account: BillingAccount(id: 1, name: "支付宝"),
-          destination: type == "transfer" ? BillingAccount(id: 2, name: "银行卡") : nil,
-          tags: [BillingTag(id: 4, name: "家庭")], excluded: true,
-          call: { request in
-            operations.append(request["operation"] as? String ?? "")
-            XCTAssertEqual(request["ledgerId"] as? Int, 2)
-            XCTAssertEqual(request["type"] as? String, type)
-            return self.editorOptions(type, ledger: 2)
-          })
-      let object = try ConfirmedBilling.decode(draft)
-      let candidate = try XCTUnwrap((object["candidates"] as? [[String: Any]])?.first)
-      XCTAssertEqual(operations, ["options"])
-      XCTAssertEqual(object["status"] as? String, "draft")
-      XCTAssertEqual(object["ledgerId"] as? Int, 2)
-      XCTAssertEqual(candidate["type"] as? String, type)
-      XCTAssertEqual(candidate["amountMinor"] as? Int, 12789)
-      XCTAssertEqual(candidate["note"] as? String, "我填写的备注；订单号也保留")
-      XCTAssertEqual(candidate["occurredAt"] as? String, ISO8601DateFormatter().string(from: date))
-      XCTAssertEqual(candidate["accountId"] as? Int, 1)
-      XCTAssertEqual(candidate["tagIds"] as? [Int], [4])
-      XCTAssertEqual(candidate["excludeFromBudget"] as? Bool, type == "expense")
-      if type == "transfer" { XCTAssertEqual(candidate["toAccountId"] as? Int, 2) }
-      else { XCTAssertEqual(candidate["categoryId"] as? Int, 10) }
-    }
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testManualMissingFieldsStayEditableAndTimeDefaultsToNow() async throws {
-    var requests: [[String: Any]] = []
-    let before = Date().addingTimeInterval(-1)
-    let draft = try await CustomBilling.draft(type: "expense", ledger: nil, category: nil,
-        amount: nil, date: nil, note: nil, account: nil, tags: [], call: { request in
-          requests.append(request)
-          return self.editorOptions()
-        })
-    let object = try ConfirmedBilling.decode(draft)
-    let candidate = try XCTUnwrap((object["candidates"] as? [[String: Any]])?.first)
-    XCTAssertEqual(requests.count, 1)
-    XCTAssertNil(requests.first?["ledgerId"])
-    XCTAssertNil(candidate["amountMinor"])
-    XCTAssertNil(candidate["accountId"])
-    XCTAssertNil(candidate["categoryId"])
-    XCTAssertEqual(candidate["note"] as? String, "")
-    XCTAssertEqual(candidate["tagIds"] as? [Int], [])
-    let time = try XCTUnwrap(ISO8601DateFormatter().date(from: candidate["occurredAt"] as? String ?? ""))
-    XCTAssertGreaterThanOrEqual(time, before)
-    XCTAssertLessThanOrEqual(time, Date())
-  }
-
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testAllFiveActionsHaveIndependentOptionalAttachment() {
+  func testBothBillingActionsHaveIndependentOptionalAttachment() {
     XCTAssertNil(ImageConfirmBillingIntent().attachment)
     XCTAssertNil(TextConfirmBillingIntent().attachment)
-    XCTAssertNil(CustomExpenseBillingIntent().attachment)
-    XCTAssertNil(CustomIncomeBillingIntent().attachment)
-    XCTAssertNil(CustomTransferBillingIntent().attachment)
   }
 
   @available(iOS 16.0, *)
@@ -780,41 +708,39 @@ class RunnerTests: XCTestCase {
   // Text entry regressions: use the same orchestration as the public action.
   @available(iOS 16.0, *)
   @MainActor
-  func testTextEntryLegacyTemplateFlagStillReviewsAndCommitsOnlyAfterConfirmation() async throws {
-    for oldFlag in [false, true] {
-      var choices = ["确认提交"]
-      var sawReview = false
-      var recognitions = 0
-      var commits = 0
-      let result = try await TextBillingEntry.run(text: "  午饭 300 元  ", configuration: [:], legacyTemplateMode: oldFlag, choose: { values, prompt in
-        XCTAssertEqual(prompt, "确认支出信息")
-        sawReview = true
-        XCTAssertTrue(values.contains("备注：原文"))
-        return self.menuValue(choices.removeFirst(), values)
-      }, input: { _ in XCTFail("Complete text bill must not request input before review"); return "" }, call: { request in
-        switch request["operation"] as? String {
-        case "recognize":
-          recognitions += 1
-          XCTAssertEqual(request["mode"] as? String, "text")
-          XCTAssertEqual(request["text"] as? String, "午饭 300 元")
-          XCTAssertEqual(request["ledgerId"] as? Int, 1)
-          XCTAssertNil(request["imagePath"])
-          return try ConfirmedBilling.decode(self.editorDraft())
-        case "validate": return ["status": "valid"]
-        default: return self.editorOptions()
-        }
-      }, commit: { submission, attachment in
-        XCTAssertTrue(sawReview)
-        XCTAssertTrue(choices.isEmpty)
-        XCTAssertEqual(submission["confirmed"] as? Bool, true)
-        XCTAssertNil(attachment)
-        commits += 1
-        return "saved"
-      })
-      XCTAssertEqual(result, "saved")
-      XCTAssertEqual(recognitions, 1)
-      XCTAssertEqual(commits, 1)
-    }
+  func testTextEntryReviewsAndCommitsOnlyAfterConfirmation() async throws {
+    var choices = ["确认提交"]
+    var sawReview = false
+    var recognitions = 0
+    var commits = 0
+    let result = try await TextBillingEntry.run(text: "  午饭 300 元  ", configuration: [:], choose: { values, prompt in
+      XCTAssertEqual(prompt, "确认支出信息")
+      sawReview = true
+      XCTAssertTrue(values.contains("备注：原文"))
+      return self.menuValue(choices.removeFirst(), values)
+    }, input: { _ in XCTFail("Complete text bill must not request input before review"); return "" }, call: { request in
+      switch request["operation"] as? String {
+      case "recognize":
+        recognitions += 1
+        XCTAssertEqual(request["mode"] as? String, "text")
+        XCTAssertEqual(request["text"] as? String, "午饭 300 元")
+        XCTAssertEqual(request["ledgerId"] as? Int, 1)
+        XCTAssertNil(request["imagePath"])
+        return try ConfirmedBilling.decode(self.editorDraft())
+      case "validate": return ["status": "valid"]
+      default: return self.editorOptions()
+      }
+    }, commit: { submission, attachment in
+      XCTAssertTrue(sawReview)
+      XCTAssertTrue(choices.isEmpty)
+      XCTAssertEqual(submission["confirmed"] as? Bool, true)
+      XCTAssertNil(attachment)
+      commits += 1
+      return "saved"
+    })
+    XCTAssertEqual(result, "saved")
+    XCTAssertEqual(recognitions, 1)
+    XCTAssertEqual(commits, 1)
   }
 
   @available(iOS 16.0, *)
@@ -1351,536 +1277,6 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(submission["originalAmountMinor"] as? Int, 30000)
     XCTAssertTrue(inputs.isEmpty)
     XCTAssertTrue(choices.isEmpty)
-  }
-
-  // These tests cover sample-state transport, not the Shortcuts host's UI.
-  @available(iOS 16.0, *)
-  func testPrefillProbeIsDiscoverableAndUsesOnlySampleValues() {
-    XCTAssertTrue(ShortcutInputPrefillProbeIntent.isDiscoverable)
-    XCTAssertFalse(ShortcutInputPrefillProbeIntent.openAppWhenRun)
-    let intent = ShortcutInputPrefillProbeIntent()
-    XCTAssertNil(intent.editingNote)
-    XCTAssertNil(intent.editingAmount)
-    XCTAssertNil(intent.choice)
-    let state = ShortcutInputPrefillProbeState()
-    XCTAssertEqual(state.note, "广东电网｜生活缴费")
-    XCTAssertEqual(state.amount, 12.34)
-    XCTAssertEqual(state.menuItems, ["备注：广东电网｜生活缴费", "金额：12.34", "结束测试（不保存）"])
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testPrefillProbePassesLatestValuesAndPreservesEmptyNote() async throws {
-    var actions = [0, 0, 0, 1, 1, 2]
-    var noteInputs = ["广东电网｜生活缴费 追加", "", "重新填写"]
-    var previousNotes = ["广东电网｜生活缴费", "广东电网｜生活缴费 追加", ""]
-    var amountInputs = [56.78, 9.01]
-    var previousAmounts = [12.34, 56.78]
-    var sawEmptyNote = false
-    var sawLatestAmount = false
-    let final = try await ShortcutInputPrefillProbe.run(choose: { items, _ in
-      sawEmptyNote = sawEmptyNote || items.contains("备注：（空）")
-      sawLatestAmount = sawLatestAmount || items.contains("金额：56.78")
-      return items[actions.removeFirst()]
-    }, editNote: { current in
-      XCTAssertEqual(current, previousNotes.removeFirst())
-      return noteInputs.removeFirst()
-    }, editAmount: { current in
-      XCTAssertEqual(current, previousAmounts.removeFirst(), accuracy: 0.00001)
-      return amountInputs.removeFirst()
-    })
-    XCTAssertTrue(sawEmptyNote)
-    XCTAssertTrue(sawLatestAmount)
-    XCTAssertEqual(final.note, "重新填写")
-    XCTAssertEqual(final.amount, 9.01, accuracy: 0.00001)
-    XCTAssertTrue(final.summary.contains("未记账"))
-    XCTAssertTrue(actions.isEmpty)
-    XCTAssertTrue(noteInputs.isEmpty && previousNotes.isEmpty)
-    XCTAssertTrue(amountInputs.isEmpty && previousAmounts.isEmpty)
-    XCTAssertEqual(ShortcutInputPrefillProbeState().note, "广东电网｜生活缴费", "New runs must not inherit old edits")
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testPrefillProbePropagatesCancellationWithoutRestarting() async throws {
-    var menus = 0
-    do {
-      _ = try await ShortcutInputPrefillProbe.run(choose: { items, _ in
-        menus += 1
-        return items[0]
-      }, editNote: { _ in
-        throw CancellationError()
-      }, editAmount: { _ in
-        XCTFail("Cancellation must not continue to another field")
-        return 0
-      })
-      XCTFail("Expected cancellation")
-    } catch is CancellationError {
-      XCTAssertEqual(menus, 1)
-    }
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  private func aiPrefillDraft(minor: Int = 12345, digits: Int = 2) -> [String: Any] {
-    ["status": "draft", "currency": "CNY", "options": ["minorDigits": digits],
-     "candidates": [["note": "AI 原文\n第二行", "amountMinor": minor, "blocked": false]]]
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testAIPrefillUsesBoundScalarValuesAndRealCurrencyPrecision() throws {
-    let entity = try ShortcutAIPrefillProbe.entity(from: aiPrefillDraft())
-    XCTAssertEqual(entity.note, "AI 原文\n第二行")
-    XCTAssertEqual(entity.amount, 123.45, accuracy: 0.00001)
-    let initial = try ShortcutAIPrefillProbe.initialState(draft: entity, note: entity.note, amount: entity.amount)
-    XCTAssertEqual(initial.menuItems, ["备注：AI 原文\n第二行", "金额：123.45 CNY", "结束测试（不保存）"])
-    XCTAssertThrowsError(try ShortcutAIPrefillProbe.initialState(draft: entity, note: nil, amount: entity.amount))
-    XCTAssertThrowsError(try ShortcutAIPrefillProbe.initialState(draft: entity, note: entity.note, amount: nil))
-    XCTAssertThrowsError(try ShortcutAIPrefillProbe.initialState(draft: entity, note: "错误变量", amount: 12.34))
-    let threeDigits = try ShortcutAIPrefillProbe.entity(from: aiPrefillDraft(minor: 12345, digits: 3))
-    let initialThree = try ShortcutAIPrefillProbe.initialState(draft: threeDigits, note: threeDigits.note, amount: threeDigits.amount)
-    XCTAssertEqual(initialThree.amountText, "12.345")
-    XCTAssertThrowsError(try ShortcutAIPrefillProbe.checkedAmount(1.234, digits: 2))
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testAIPrefillRejectsMultipleBillsMissingAmountsAndBlockedCurrency() throws {
-    var multi = aiPrefillDraft()
-    multi["candidates"] = [["note": "一", "amountMinor": 100], ["note": "二", "amountMinor": 200]]
-    XCTAssertThrowsError(try ShortcutAIPrefillProbe.entity(from: multi))
-    var invalid = aiPrefillDraft()
-    invalid["candidates"] = [["note": "原文"]]
-    XCTAssertThrowsError(try ShortcutAIPrefillProbe.entity(from: invalid))
-    invalid["candidates"] = [["note": "原文", "amountMinor": 100, "blocked": true]]
-    XCTAssertThrowsError(try ShortcutAIPrefillProbe.entity(from: invalid))
-    invalid = aiPrefillDraft(digits: 5)
-    XCTAssertThrowsError(try ShortcutAIPrefillProbe.entity(from: invalid))
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testAIProbeOnlyRequestsOptionsAndRecognitionNeverCommit() async throws {
-    var operations: [String] = []
-    let entity = try await ShortcutAIPrefillProbe.recognize(image: nil, text: " 示例文字 ", ledger: nil, call: { request in
-      let op = request["operation"] as? String ?? ""
-      operations.append(op)
-      if op == "options" { return ["ledgerId": 7] }
-      XCTAssertEqual(op, "recognize")
-      XCTAssertEqual(request["ledgerId"] as? Int, 7)
-      XCTAssertEqual(request["text"] as? String, "示例文字")
-      XCTAssertEqual(request["mode"] as? String, "text")
-      XCTAssertNil(request["imagePath"])
-      return self.aiPrefillDraft()
-    }, recognizeImage: { _, _ in
-      XCTFail("Text recognition must never upload an image"); return [:]
-    })
-    XCTAssertEqual(operations, ["options", "recognize"])
-    XCTAssertEqual(entity.note, "AI 原文\n第二行")
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testAIPrefillRepeatedEditsUseLatestValuesIncludingEmptyNote() async throws {
-    let entity = try ShortcutAIPrefillProbe.entity(from: aiPrefillDraft())
-    let initial = try ShortcutAIPrefillProbe.initialState(draft: entity, note: entity.note, amount: entity.amount)
-    var actions = [0, 0, 1, 1, 2]
-    var notes = ["AI 原文\n第二行", "追加备注"]
-    var amounts = [123.45, 45.67]
-    let final = try await ShortcutAIPrefillProbe.run(initial: initial, choose: { items, _ in
-      return items[actions.removeFirst()]
-    }, editNote: { current in
-      XCTAssertEqual(current, notes.removeFirst())
-      return notes.isEmpty ? "" : notes[0]
-    }, editAmount: { current in
-      XCTAssertEqual(current, amounts.removeFirst(), accuracy: 0.00001)
-      return amounts.isEmpty ? 56.78 : amounts[0]
-    })
-    XCTAssertEqual(final.note, "")
-    XCTAssertEqual(final.amount, 56.78, accuracy: 0.00001)
-    XCTAssertTrue(final.menuItems.contains("备注：（空）"))
-    XCTAssertTrue(final.summary.contains("未保存账单"))
-    XCTAssertTrue(actions.isEmpty && notes.isEmpty && amounts.isEmpty)
-    XCTAssertTrue(RecognizeAIDraftProbeIntent.isDiscoverable)
-    XCTAssertTrue(ConfirmAIDraftProbeIntent.isDiscoverable)
-    XCTAssertFalse(RecognizeAIDraftProbeIntent.openAppWhenRun)
-    XCTAssertFalse(ConfirmAIDraftProbeIntent.openAppWhenRun)
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testSingleBillSystemInputPreservesAllFieldsAndHasNoLegacyBatchSplit() async throws {
-    var source = try ConfirmedBilling.decode(editorDraft())
-    var candidate = try XCTUnwrap((source["candidates"] as? [[String: Any]])?.first)
-    candidate["tagIds"] = [3, 4]
-    source["candidates"] = [candidate]
-    var choices = ["不计预算", "备注", "金额", "时间", "备注", "确认提交"]
-    var requests = 0
-    let choose: ([String], String) async throws -> String = { values, _ in
-      if values.contains("确认提交") {
-        XCTAssertFalse(values.contains("拆分或新增明细"))
-        XCTAssertFalse(values.contains("编辑明细"))
-        XCTAssertTrue(values.contains { $0.hasPrefix("账本：") })
-        XCTAssertTrue(values.contains { $0.hasPrefix("收支类型：") })
-      }
-      return self.menuValue(choices.removeFirst(), values)
-    }
-    let call: ([String: Any]) async throws -> [String: Any] = { request in
-      XCTAssertTrue(["options", "validate"].contains(request["operation"] as? String ?? ""), "No AI or commit while editing")
-      if request["operation"] as? String == "validate" { return ["status": "valid"] }
-      requests += 1; return self.editorOptions()
-    }
-    var step = try SingleBillingStep(BillingStepFlow.start(ConfirmedBilling.encode(source), showIncompleteDraft: true, singleOnly: true))
-    step = try await SingleBillingFlow.advance(step, hasResponse: false, text: nil, number: nil, date: nil, choose: choose, call: call)
-    XCTAssertEqual(step.inputType, "text")
-    XCTAssertEqual(step.currentText, "原文")
-    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: "修改后的备注", number: nil, date: nil, choose: choose, call: call)
-    XCTAssertEqual(step.inputType, "number")
-    XCTAssertEqual(step.currentNumber, 300)
-    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: nil, number: 12.34, date: nil, choose: choose, call: call)
-    XCTAssertEqual(step.inputType, "date")
-    let changedDate = try XCTUnwrap(SingleBillingFlow.date("2026-11-06T12:30:00+08:00"))
-    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: nil, number: nil, date: changedDate, choose: choose, call: call)
-    XCTAssertEqual(step.currentText, "修改后的备注", "Second note edit must default to the latest draft text")
-    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: nil, number: nil, date: nil, choose: choose, call: call)
-    XCTAssertEqual(step.status, "confirmed")
-    XCTAssertTrue(choices.isEmpty)
-    XCTAssertGreaterThan(requests, 0)
-    var commits = 0
-    _ = try await SingleBillingFlow.save(step, attachment: nil, commit: { submission, attachment in
-      commits += 1
-      XCTAssertNil(attachment)
-      let entry = try XCTUnwrap((submission["entries"] as? [[String: Any]])?.first)
-      XCTAssertEqual(entry["note"] as? String, "", "An explicit empty answer clears the note")
-      XCTAssertEqual(entry["amountMinor"] as? Int, 1234)
-      XCTAssertEqual(entry["tagIds"] as? [Int], [3, 4], "Do not truncate a multi-tag preset")
-      XCTAssertEqual(entry["excludeFromBudget"] as? Bool, true)
-      XCTAssertEqual(submission["occurredAt"] as? String, "2026-11-06T04:30:00Z")
-      XCTAssertEqual(submission["requestId"] as? String, source["requestId"] as? String)
-      return "saved"
-    })
-    XCTAssertEqual(commits, 1)
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testSingleBillCancellationAndUnconfirmedStateNeverSave() async throws {
-    var step = try SingleBillingStep(BillingStepFlow.start(editorDraft(), singleOnly: true))
-    var commits = 0
-    do {
-      _ = try await SingleBillingFlow.save(step, attachment: nil, commit: { _, _ in commits += 1; return "bad" })
-      XCTFail("Editing is not final confirmation")
-    } catch {}
-    step = try await SingleBillingFlow.advance(step, hasResponse: false, text: nil, number: nil, date: nil, choose: { _, _ in
-      "取消提交"
-    }, call: { _ in self.editorOptions() })
-    XCTAssertEqual(step.status, "cancelled")
-    do {
-      _ = try await SingleBillingFlow.save(step, attachment: nil, commit: { _, _ in commits += 1; return "bad" })
-      XCTFail("Cancelled step must not save")
-    } catch {}
-    XCTAssertEqual(commits, 0)
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testSingleBillTagSelectionAndClearDoesNotResetOtherFields() async throws {
-    var actions = ["标签", "○ 家庭 [4]", "完成标签选择", "标签", "清空标签", "完成标签选择", "确认提交"]
-    let step = try SingleBillingStep(BillingStepFlow.start(editorDraft(), singleOnly: true))
-    let final = try await SingleBillingFlow.advance(step, hasResponse: false, text: nil, number: nil, date: nil, choose: { values, _ in
-      let action = actions.removeFirst()
-      if action == "标签" && actions.count == 3 { XCTAssertTrue(values.contains("标签：个人、家庭")) }
-      return self.menuValue(action, values)
-    }, call: { request in request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions() })
-    let outer = try ConfirmedBilling.decode(final.state)
-    let payload = try ConfirmedBilling.decode(try XCTUnwrap(outer["submission"] as? String))
-    let entry = try XCTUnwrap((payload["entries"] as? [[String: Any]])?.first)
-    XCTAssertEqual(entry["tagIds"] as? [Int], [])
-    XCTAssertEqual(entry["note"] as? String, "原文")
-    XCTAssertEqual(entry["amountMinor"] as? Int, 30000)
-    XCTAssertEqual(entry["excludeFromBudget"] as? Bool, false)
-    XCTAssertTrue(actions.isEmpty)
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testSingleBillNumericInputRejectsExtraPrecisionWithoutLosingOldAmount() async throws {
-    var actions = ["金额", "返回修改", "金额"]
-    let choose: ([String], String) async throws -> String = { values, _ in self.menuValue(actions.removeFirst(), values) }
-    let call: ([String: Any]) async throws -> [String: Any] = { _ in self.editorOptions() }
-    let start = try SingleBillingStep(BillingStepFlow.start(editorDraft(), singleOnly: true))
-    let pending = try await SingleBillingFlow.advance(start, hasResponse: false, text: nil, number: nil, date: nil, choose: choose, call: call)
-    let again = try await SingleBillingFlow.advance(pending, hasResponse: true, text: nil, number: 1.234, date: nil, choose: choose, call: call)
-    XCTAssertEqual(again.currentNumber, 300)
-    XCTAssertEqual(again.inputType, "number")
-    XCTAssertTrue(actions.isEmpty)
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testSingleBillDoesNotAcceptOldTemplateOrMultipleEntrySubmission() async throws {
-    let old = try SingleBillingStep(BillingStepFlow.start(editorDraft()))
-    XCTAssertThrowsError(try SingleBillingFlow.checkSingle(old))
-    var submission = try ConfirmedBilling.decode(editorDraft())
-    submission["confirmed"] = true
-    submission["entries"] = [["amountMinor": 100], ["amountMinor": 200]]
-    let invalid = try SingleBillingStep(ConfirmedBilling.encode(["status": "confirmed", "singleOnly": true, "submission": ConfirmedBilling.encode(submission)]))
-    var called = false
-    do {
-      _ = try await SingleBillingFlow.save(invalid, attachment: nil, commit: { _, _ in called = true; return "bad" })
-      XCTFail("Round one can only submit one entry")
-    } catch {}
-    XCTAssertFalse(called)
-    XCTAssertTrue(StartSingleBillingIntent.isDiscoverable)
-    XCTAssertTrue(ContinueSingleBillingIntent.isDiscoverable)
-    XCTAssertTrue(SaveSingleBillingIntent.isDiscoverable)
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testManualCategoryRulesUseLocalOperationAndPreserveInputValues() async throws {
-    for type in ["expense", "income"] {
-      var operations: [String] = []
-      let encoded = try await CustomBilling.draft(type: type, ledger: BillingLedger(id: 2, name: "家庭"),
-          category: nil, amount: "12.34", date: Date(timeIntervalSince1970: 1000), note: "原样备注",
-          account: BillingAccount(id: 1, name: "账户"), tags: [BillingTag(id: 4, name: "家庭")], excluded: true,
-          merchant: "商户线索", ruleText: "原始全文", call: { request in
-            let operation = request["operation"] as? String ?? ""
-            operations.append(operation)
-            if operation == "options" { return self.editorOptions(type, ledger: 2) }
-            XCTAssertEqual(operation, "classify")
-            XCTAssertEqual(request["ledgerId"] as? Int, 2)
-            XCTAssertEqual(request["type"] as? String, type)
-            XCTAssertEqual(request["note"] as? String, "原样备注")
-            XCTAssertEqual(request["merchant"] as? String, "商户线索")
-            XCTAssertEqual(request["ruleText"] as? String, "原始全文")
-            return ["status": "ok", "categoryId": 88, "warnings": [String]()]
-          })
-      let draft = try ConfirmedBilling.decode(encoded)
-      let candidate = try XCTUnwrap((draft["candidates"] as? [[String: Any]])?.first)
-      XCTAssertEqual(operations, ["options", "classify"])
-      XCTAssertEqual(candidate["categoryId"] as? Int, 88)
-      XCTAssertEqual(candidate["amountMinor"] as? Int, 1234)
-      XCTAssertEqual(candidate["note"] as? String, "原样备注")
-      XCTAssertEqual(candidate["tagIds"] as? [Int], [4])
-      XCTAssertEqual(candidate["excludeFromBudget"] as? Bool, type == "expense")
-    }
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testManualCategoryUnmatchedStaysUnclassifiedAndTransferSkipsRules() async throws {
-    for type in ["expense", "transfer"] {
-      var operations: [String] = []
-      let encoded = try await CustomBilling.draft(type: type, ledger: nil, category: nil,
-          amount: "1", date: nil, note: "无匹配备注", account: nil, tags: [], merchant: "商户", ruleText: "全文", call: { request in
-            let operation = request["operation"] as? String ?? ""
-            operations.append(operation)
-            if operation == "options" { return self.editorOptions(type) }
-            XCTAssertEqual(operation, "classify")
-            return ["status": "ok", "warnings": ["个人规则目标分类已失效"]]
-          })
-      let candidate = try XCTUnwrap(((try ConfirmedBilling.decode(encoded))["candidates"] as? [[String: Any]])?.first)
-      XCTAssertEqual(operations, type == "transfer" ? ["options"] : ["options", "classify"])
-      XCTAssertNil(candidate["categoryId"])
-      if type == "expense" { XCTAssertEqual(candidate["warnings"] as? [String], ["个人规则目标分类已失效"]) }
-    }
-    let intent = StartSingleBillingIntent()
-    XCTAssertNil(intent.merchant)
-    XCTAssertNil(intent.ruleText)
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  private func splitContextForTest(paid: Int = 0, count: Int = 0) -> [String: Any] {
-    ["version": 1, "sessionId": "12345678-1111-4222-8333-123456789abc",
-     "totalMinor": 30000, "paidMinor": paid, "savedCount": count, "minorDigits": 2,
-     "ledgerId": 1, "accountId": 1, "currency": "CNY", "useAllRemaining": false,
-     "template": ["note": "原文", "tagIds": [3, 4], "excludeFromBudget": true,
-       "categoryId": 10, "occurredAt": "2026-11-06T12:30:00+08:00"]]
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  private func confirmedSplitForTest(_ ctx: [String: Any], amount: Int) throws -> SingleBillingStep {
-    let index = (ctx["savedCount"] as! Int) + 1
-    let bill: [String: Any] = ["schemaVersion": 1, "confirmed": true, "type": "expense",
-      "requestId": ProgressiveSplitFlow.partID(ctx["sessionId"] as! String, index: index),
-      "ledgerId": ctx["ledgerId"]!, "accountId": ctx["accountId"]!, "currency": ctx["currency"]!,
-      "occurredAt": "2026-11-06T12:30:00+08:00", "originalAmountMinor": amount,
-      "entries": [["amountMinor": amount, "note": "第\(index)笔", "tagIds": [3, 4], "excludeFromBudget": true, "categoryId": 10]],
-      "split": ["sessionId": ctx["sessionId"]!, "partIndex": index, "totalMinor": ctx["totalMinor"]!]]
-    return try ProgressiveSplitFlow.envelope("split-confirmed", context: ctx, submission: ConfirmedBilling.encode(bill))
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  private func splitReceiptForTest(_ bill: [String: Any], paid: Int, count: Int) -> [String: Any] {
-    let split = bill["split"] as! [String: Any]
-    return ["status": "committed", "requestId": bill["requestId"]!, "count": 1, "type": "expense",
-      "totalAmountMinor": bill["originalAmountMinor"]!, "currency": bill["currency"]!,
-      "split": split.merging(["paidMinor": paid, "savedCount": count,
-                              "remainingMinor": (split["totalMinor"] as! Int) - paid]) { _, new in new }]
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testProgressiveSplitEditsCurrentPartAndRejectsAmountAboveRemaining() async throws {
-    let initial = try ProgressiveSplitFlow.part(splitContextForTest(paid: 8000, count: 1), useAll: false)
-    var actions = ["金额", "返回修改", "金额", "备注", "确认保存此笔"]
-    let choose: ([String], String) async throws -> String = { values, prompt in
-      if values.contains("确认保存此笔") {
-        XCTAssertFalse(values.contains { $0.hasPrefix("账本：") || $0.hasPrefix("账户：") || $0.hasPrefix("收支类型：") })
-        XCTAssertTrue(prompt.contains("剩余未记 220.00"))
-      }
-      let selected = self.menuValue(actions.removeFirst(), values)
-      XCTAssertTrue(values.contains(selected), selected)
-      return selected
-    }
-    let call: ([String: Any]) async throws -> [String: Any] = { request in
-      XCTAssertTrue(["options", "validate"].contains(request["operation"] as? String ?? ""))
-      return request["operation"] as? String == "validate" ? ["status": "valid"] : self.editorOptions()
-    }
-    var step = try await SingleBillingFlow.advance(initial, hasResponse: false, text: nil, number: nil, date: nil, choose: choose, call: call)
-    XCTAssertEqual(step.currentNumber, 220)
-    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: nil, number: 230, date: nil, choose: choose, call: call)
-    XCTAssertEqual(step.currentNumber, 220, "Oversize must preserve old amount")
-    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: nil, number: 150, date: nil, choose: choose, call: call)
-    XCTAssertEqual(step.currentText, "原文")
-    step = try await SingleBillingFlow.advance(step, hasResponse: true, text: "修改后", number: nil, date: nil, choose: choose, call: call)
-    XCTAssertEqual(step.status, "split-confirmed")
-    let outer = try ConfirmedBilling.decode(step.state)
-    let ctx = try XCTUnwrap(outer["splitContext"] as? [String: Any])
-    let bill = try ProgressiveSplitFlow.checkedSubmission(outer, context: ctx)
-    XCTAssertEqual(bill["originalAmountMinor"] as? Int, 15000)
-    let entry = try XCTUnwrap((bill["entries"] as? [[String: Any]])?.first)
-    XCTAssertEqual(entry["note"] as? String, "修改后")
-    XCTAssertEqual(entry["tagIds"] as? [Int], [3, 4])
-    XCTAssertEqual(entry["excludeFromBudget"] as? Bool, true)
-    XCTAssertTrue(actions.isEmpty)
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testProgressiveSaveReconcilesLostReplyAndRetryUsesSamePayload() async throws {
-    let ctx = splitContextForTest()
-    let step = try confirmedSplitForTest(ctx, amount: 8000)
-    var stored: [String: Any]?
-    var commits = 0
-    let call: ([String: Any]) async throws -> [String: Any] = { request in
-      let bill = try XCTUnwrap(request["submission"] as? [String: Any])
-      XCTAssertEqual(bill["requestId"] as? String, ProgressiveSplitFlow.partID(ctx["sessionId"] as! String, index: 1))
-      if request["operation"] as? String == "query_split" {
-        return stored ?? ["status": "not_found"]
-      }
-      XCTAssertEqual(request["operation"] as? String, "commit")
-      commits += 1
-      stored = self.splitReceiptForTest(bill, paid: 8000, count: 1)
-      throw NSError(domain: "test-lost-reply", code: 1014)
-    }
-    let next = try await ProgressiveSplitFlow.save(step, attachment: nil, call: call)
-    XCTAssertEqual(next.status, "split-next")
-    XCTAssertTrue(next.resultMessage.contains("剩余未记 220.00"))
-    let again = try await ProgressiveSplitFlow.save(step, attachment: nil, call: call)
-    XCTAssertEqual(again.status, "split-next")
-    XCTAssertEqual(commits, 1)
-    let progress = try XCTUnwrap((try ConfirmedBilling.decode(next.state))["splitContext"] as? [String: Any])
-    XCTAssertEqual(progress["paidMinor"] as? Int, 8000)
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testProgressiveSaveFailureKeepsProgressAndCannotSilentlyStartNextPart() async throws {
-    let ctx = splitContextForTest(paid: 8000, count: 1)
-    let step = try confirmedSplitForTest(ctx, amount: 15000)
-    let failed = try await ProgressiveSplitFlow.save(step, attachment: nil, call: { request in
-      if request["operation"] as? String == "query_split" { return ["status": "not_found"] }
-      throw NSError(domain: "test-write", code: 1)
-    })
-    XCTAssertEqual(failed.status, "split-retry")
-    let raw = try ConfirmedBilling.decode(failed.state)
-    let kept = try XCTUnwrap(raw["splitContext"] as? [String: Any])
-    XCTAssertEqual(kept["paidMinor"] as? Int, 8000)
-    XCTAssertEqual(kept["savedCount"] as? Int, 1)
-    let retry = try await SingleBillingFlow.advance(failed, hasResponse: false, text: nil, number: nil, date: nil, choose: { values, _ in
-      XCTAssertEqual(values, ["重试保存当前笔", "结束并稍后查询"])
-      return "重试保存当前笔"
-    })
-    XCTAssertEqual(retry.status, "split-confirmed")
-    XCTAssertEqual(try ConfirmedBilling.decode(retry.state)["submission"] as? String, raw["submission"] as? String)
-    let stopped = try await ProgressiveSplitFlow.next(failed, choose: { _, _ in "结束并稍后查询" })
-    XCTAssertEqual(stopped.status, "split-ended")
-    XCTAssertTrue(stopped.resultMessage.contains("可能已经保存"))
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testProgressivePartialEndKeepsSavedBillsAndFinalRemainderNeedsConfirmation() async throws {
-    let ctx = splitContextForTest(paid: 23000, count: 2)
-    let after = try ProgressiveSplitFlow.envelope("split-next", context: ctx)
-    let stopped = try await ProgressiveSplitFlow.next(after, choose: { _, _ in "结束拆分" })
-    XCTAssertEqual(stopped.status, "split-ended")
-    XCTAssertTrue(stopped.resultMessage.contains("剩余未记 70.00"))
-    XCTAssertTrue(stopped.resultMessage.contains("已保存账单保留"))
-    let last = try await ProgressiveSplitFlow.next(after, choose: { _, _ in "剩余作为最后一笔编辑" })
-    XCTAssertEqual(last.status, "editing", "No automatic remainder commit")
-    let outer = try ConfirmedBilling.decode(last.state)
-    let lastCtx = try XCTUnwrap(outer["splitContext"] as? [String: Any])
-    XCTAssertEqual(lastCtx["useAllRemaining"] as? Bool, true)
-    let confirmed = try confirmedSplitForTest(lastCtx, amount: 7000)
-    let final = try await ProgressiveSplitFlow.save(confirmed, attachment: nil, call: { request in
-      if request["operation"] as? String == "query_split" { return ["status": "not_found"] }
-      return self.splitReceiptForTest(try XCTUnwrap(request["submission"] as? [String: Any]), paid: 30000, count: 3)
-    })
-    XCTAssertEqual(final.status, "split-ended")
-    XCTAssertTrue(final.resultMessage.contains("全部拆分已在本机入账"))
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testProgressiveIDsAndNormalSaveGuardAgainstDuplicateWholeBill() async throws {
-    let session = splitContextForTest()["sessionId"] as! String
-    let first = ProgressiveSplitFlow.partID(session, index: 1)
-    XCTAssertNotNil(UUID(uuidString: first))
-    XCTAssertEqual(first, ProgressiveSplitFlow.partID(session.uppercased(), index: 1))
-    XCTAssertNotEqual(first, ProgressiveSplitFlow.partID(session, index: 2))
-    let split = try confirmedSplitForTest(splitContextForTest(), amount: 8000)
-    var calls = 0
-    do {
-      _ = try await SingleBillingFlow.save(split, attachment: nil, commit: { _, _ in calls += 1; return "bad" })
-      XCTFail("Split confirmation must use its dedicated per-part save")
-    } catch {}
-    XCTAssertEqual(calls, 0)
-    XCTAssertTrue(SaveProgressiveSplitIntent.isDiscoverable)
-    XCTAssertFalse(SaveProgressiveSplitIntent.openAppWhenRun)
-  }
-
-  @available(iOS 16.0, *)
-  @MainActor
-  func testSingleMenuEntersProgressiveSplitWithoutCommittingOriginal() async throws {
-    let start = try SingleBillingStep(BillingStepFlow.start(editorDraft(), showIncompleteDraft: true, singleOnly: true))
-    var actions = ["备注", "拆分并逐笔保存", "金额"]
-    let choose: ([String], String) async throws -> String = { values, _ in
-      let selected = self.menuValue(actions.removeFirst(), values)
-      XCTAssertTrue(values.contains(selected), selected)
-      return selected
-    }
-    let call: ([String: Any]) async throws -> [String: Any] = { request in
-      XCTAssertEqual(request["operation"] as? String, "options", "Beginning a split must not validate/commit original bill or rerun AI")
-      return self.editorOptions()
-    }
-    let note = try await SingleBillingFlow.advance(start, hasResponse: false, text: nil, number: nil, date: nil, choose: choose, call: call)
-    let part = try await SingleBillingFlow.advance(note, hasResponse: true, text: "拆分前已改备注", number: nil, date: nil, choose: choose, call: call)
-    XCTAssertEqual(part.status, "input")
-    XCTAssertEqual(part.inputType, "number")
-    XCTAssertEqual(part.currentNumber, 300)
-    let outer = try ConfirmedBilling.decode(part.state)
-    let ctx = try XCTUnwrap(outer["splitContext"] as? [String: Any])
-    XCTAssertEqual(ctx["savedCount"] as? Int, 0)
-    XCTAssertEqual(ctx["paidMinor"] as? Int, 0)
-    XCTAssertEqual((ctx["template"] as? [String: Any])?["note"] as? String, "拆分前已改备注")
-    XCTAssertTrue(actions.isEmpty)
   }
 
 }
