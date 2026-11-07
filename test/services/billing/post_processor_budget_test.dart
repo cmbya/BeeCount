@@ -41,6 +41,22 @@ void main() {
     expect((await c.read(budgetOverviewProvider.future))!.totalBudget!.used, 35);
   });
 
+  test('post-commit sync error cannot become a failed bill save', () async {
+    final id = await repo.addTransaction(ledgerId: ledger, type: 'expense',
+        amount: 10, happenedAt: DateTime.now());
+    final failing = ProviderContainer(overrides: [
+      syncServiceProvider.overrideWith((ref) => throw StateError('sync unavailable')),
+    ]);
+    try {
+      await PostProcessor.afterCommit(() => PostProcessor.runC(failing, ledgerId: ledger));
+      expect(await repo.getTransactionById(id), isNotNull);
+      expect(failing.read(budgetRefreshProvider), 1);
+      expect(await db.select(db.transactions).get(), hasLength(1));
+    } finally {
+      failing.dispose();
+    }
+  });
+
   test('Ref post-processing refreshes the budget', () async {
     final provider = Provider<Future<void>>((ref) =>
         PostProcessor.runR(ref, ledgerId: ledger));

@@ -34,9 +34,10 @@ class BillCreationService {
   BillCreationService(this.repo, {this.ensureRate});
 
   /// 从 [BillInfo] 创建账单交易。入参的 [bill] 经过 sanitize,
-  /// **保证 amount 非空且 abs > 0、time 非空**,内部无需再做兜底。
+  /// 调用方通常已 sanitize；仍检查金额有限且 abs > 0，防止损坏输入入库。
   ///
-  /// 返回创建的交易 ID,失败(数据库异常)返回 null。
+  /// 返回创建的交易 ID；无效金额返回 null。数据库/标签失败会抛出，
+  /// LocalRepository 下整个账单与标签事务会回滚，由调用方汇总失败。
   Future<int?> createFromBill({
     required BillInfo bill,
     required int ledgerId,
@@ -46,15 +47,14 @@ class BillCreationService {
     bool autoAddTags = true,
   }) async {
     final amount = bill.amount;
-    if (amount == null || amount.abs() <= 0) {
+    if (amount == null || !amount.isFinite || amount.abs() <= 0) {
       logger.warning(_tag, '[校验] amount 无效,跳过');
       return null;
     }
 
     // 1. 确定交易类型
     final transactionType = _resolveType(bill);
-    logger.debug(_tag,
-        '[类型判断] $transactionType');
+    logger.debug(_tag, '[类型判断] $transactionType');
 
     // 2. 查询对应类型的所有可用分类
     final categories = await _loadUsableCategories(transactionType);
@@ -166,7 +166,10 @@ class BillCreationService {
     final transactionId = local is LocalRepository
         ? await local.db.transaction(persist)
         : await persist();
-    logger.info(_tag, '[自动记账] 成功');
+    // Diagnostic observers must not turn a committed bill into a failed save.
+    try {
+      logger.info(_tag, '[自动记账] 成功');
+    } catch (_) {}
 
     return transactionId;
   }
@@ -410,7 +413,8 @@ class BillCreationService {
           (r) => r.quoteCurrency.toUpperCase() == quote && valid(r.rate));
     } catch (e) {
       // 查不了就当没有,交给 _ensureRateAvailable 兜(它自己也吞异常)
-      logger.debug(_tag, '[汇率] 本地汇率检查失败,按「无」处理: $e');
+      logger.debug(_tag,
+          '[汇率] 本地汇率检查失败,按「无」处理 (${e.runtimeType})');
       return false;
     }
   }
@@ -430,7 +434,7 @@ class BillCreationService {
       }
     } catch (e, st) {
       logger.warning(_tag, '[汇率] $code 拉取异常,本笔按 1:1 暂记', st);
-      logger.debug(_tag, '[汇率] 异常详情: $e');
+      logger.debug(_tag, '[汇率] 异常类型: ${e.runtimeType}');
     }
   }
 

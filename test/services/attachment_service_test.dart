@@ -70,6 +70,23 @@ class _TestAttachmentService extends AttachmentService {
       Directory('${directory.path}/thumbs')..createSync();
 }
 
+class _ThrowingAttachmentService extends _TestAttachmentService {
+  _ThrowingAttachmentService(Ref ref, Directory directory, ImagePicker picker)
+      : super(ref, directory, picker);
+
+  @override
+  Future<TransactionAttachment?> saveAttachment({
+    required int transactionId,
+    required File sourceFile,
+    required int index,
+    bool urgent = false,
+  }) {
+    if (index == 1) throw StateError('injected attachment failure');
+    return super.saveAttachment(transactionId: transactionId,
+        sourceFile: sourceFile, index: index, urgent: urgent);
+  }
+}
+
 Future<Uint8List> png(int width, int height) async {
   final recorder = ui.PictureRecorder();
   ui.Canvas(recorder).drawPaint(ui.Paint()..color = const ui.Color(0xFF123456));
@@ -167,6 +184,41 @@ void main() {
     expect(result.isComplete, isFalse);
     expect(await db.select(db.transactions).get(), hasLength(1));
     expect(await db.select(db.transactionAttachments).get(), hasLength(2));
+  });
+
+  test('a thrown image failure does not skip later images', () async {
+    await keepOriginal(true);
+    final isolated = ProviderContainer(overrides: [
+      repositoryProvider.overrideWithValue(LocalRepository(db)),
+      attachmentServiceProvider.overrideWith(
+          (ref) => _ThrowingAttachmentService(ref, directory, picker)),
+    ]);
+    try {
+      await isolated.read(attachmentKeepOriginalProvider.future);
+      final result = await isolated.read(attachmentServiceProvider)
+          .saveAttachmentsWithResult(transactionId: transactionId,
+              sourceFiles: [source, source, source]);
+      expect(result.failedIndexes, [1]);
+      expect(result.saved.map((a) => a.sortOrder), [0, 2]);
+      expect(await db.select(db.transactions).get(), hasLength(1));
+    } finally {
+      isolated.dispose();
+    }
+  });
+
+  test('attachment cleanup does not delete a file on outer rollback', () async {
+    await keepOriginal(true);
+    final service = container.read(attachmentServiceProvider);
+    final saved = (await service.saveAttachment(
+        transactionId: transactionId, sourceFile: source, index: 0))!;
+    final file = File(await service.getAttachmentPath(saved.fileName));
+    await expectLater(db.transaction(() async {
+      await service.deleteAttachment(saved.id);
+      expect(await file.exists(), isTrue);
+      throw StateError('rollback');
+    }), throwsStateError);
+    expect(await file.exists(), isTrue);
+    expect(await db.select(db.transactionAttachments).get(), hasLength(1));
   });
 
   test('empty batch result is complete', () async {

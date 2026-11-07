@@ -12,6 +12,22 @@ import '../system/logger_service.dart';
 /// - `run` 系列：交易创建后使用，刷新统计 + 可选刷新标签/附件 + 同步
 /// - `sync` 系列：其他数据变更后使用（分类、账户等），仅同步
 class PostProcessor {
+  /// Best-effort work after a successful database commit. A sync/cache error
+  /// must never be reported as a failed bill save (and invite a duplicate retry).
+  static Future<void> afterCommit(Future<void> Function() operation) async {
+    try {
+      await operation();
+    } catch (error) {
+      // Raw database/network errors can contain bill contents or credentials.
+      try {
+        logger.warning('PostProcessor',
+            '账单已保存，后处理未完成 (${error.runtimeType})');
+      } catch (_) {
+        // Even a failed log observer cannot change a committed save result.
+      }
+    }
+  }
+
   // ============ 交易后完整处理 ============
 
   /// UI 层使用（WidgetRef）

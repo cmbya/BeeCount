@@ -5,7 +5,6 @@ import 'package:flutter/services.dart';
 
 import '../../l10n/app_localizations.dart';
 import '../../providers.dart';
-import '../../providers/budget_providers.dart';
 import '../../data/db.dart';
 import '../../data/repositories/local/local_repository.dart';
 import '../../utils/shared_ledger_picker_filter.dart';
@@ -305,7 +304,8 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
         onSubmit: (res) async {
           final repo = ref.read(repositoryProvider);
           final attachmentService = ref.read(attachmentServiceProvider);
-          final attachmentWarning = AppLocalizations.of(context).transactionAttachmentsPartial;
+          final l10n = AppLocalizations.of(context);
+          final attachmentWarning = l10n.transactionAttachmentsPartial;
           // §7 v25:Category 是来自 SharedLedger* 的 synthetic (id<0)时,
           // categoryId 留 null,override 走 syncId。同理对 account/toAccount。
           // res.accountId 可能也是 synthetic(Account picker 用同一规则)。
@@ -325,114 +325,118 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
               isSyntheticAccount ? await _resolveSyncIdByAccountId(res.accountId!, ledgerId) : null;
           Future<int> persist() async {
             int transactionId;
-          if (widget.editingTransactionId != null) {
-            // 编辑模式：使用repository更新交易
-            await repo.updateTransaction(
-              id: widget.editingTransactionId!,
-              type: kind,
-              amount: res.amount,
-              categoryId: categoryIdForWrite,
-              note: res.note,
-              happenedAt: res.date,
-              accountId: accountIdForUpdate,
-              categorySyncIdOverride: categoryOverride,
-              accountSyncIdOverride: accountOverride,
-              excludeFromStats: res.excludeFromStats,
-              excludeFromBudget: res.excludeFromBudget,
-              currencyCode: res.currencyCode,
-              nativeAmount: res.nativeAmount,
-            );
-            transactionId = widget.editingTransactionId!;
+            if (widget.editingTransactionId != null) {
+              // 编辑模式：使用repository更新交易
+              await repo.updateTransaction(
+                id: widget.editingTransactionId!,
+                type: kind,
+                amount: res.amount,
+                categoryId: categoryIdForWrite,
+                note: res.note,
+                happenedAt: res.date,
+                accountId: accountIdForUpdate,
+                categorySyncIdOverride: categoryOverride,
+                accountSyncIdOverride: accountOverride,
+                excludeFromStats: res.excludeFromStats,
+                excludeFromBudget: res.excludeFromBudget,
+                currencyCode: res.currencyCode,
+                nativeAmount: res.nativeAmount,
+              );
+              transactionId = widget.editingTransactionId!;
+            } else {
+              transactionId = await repo.addTransaction(
+                ledgerId: ledgerId,
+                type: kind,
+                amount: res.amount,
+                categoryId: categoryIdForWrite,
+                happenedAt: res.date,
+                note: res.note,
+                accountId: accountIdForAdd,
+                categorySyncIdOverride: categoryOverride,
+                accountSyncIdOverride: accountOverride,
+                excludeFromStats: res.excludeFromStats,
+                excludeFromBudget: res.excludeFromBudget,
+                currencyCode: res.currencyCode,
+                nativeAmount: res.nativeAmount,
+              );
+            }
+            // 更新标签关联
+            // §7 共享账本:tag.id < 0 是 synthetic(Owner tag from SharedLedger*),
+            // 主表 Tags 没该行,不能直接写 transaction_tags.tag_id。分两类:
+            // - 正数 id → 写 transaction_tags 主表(老路径)
+            // - 负数 id → 走 SharedLedgerTags 反查 syncId → 写 transaction_tag_overrides
+            final normalTagIds = res.tagIds.where((id) => id >= 0).toList();
+            final syntheticTagIds = res.tagIds.where((id) => id < 0).toList();
 
-          } else {
-            transactionId = await repo.addTransaction(
-              ledgerId: ledgerId,
-              type: kind,
-              amount: res.amount,
-              categoryId: categoryIdForWrite,
-              happenedAt: res.date,
-              note: res.note,
-              accountId: accountIdForAdd,
-              categorySyncIdOverride: categoryOverride,
-              accountSyncIdOverride: accountOverride,
-              excludeFromStats: res.excludeFromStats,
-              excludeFromBudget: res.excludeFromBudget,
-              currencyCode: res.currencyCode,
-              nativeAmount: res.nativeAmount,
-            );
+            if (normalTagIds.isNotEmpty) {
+              await repo.updateTransactionTags(
+                transactionId: transactionId,
+                tagIds: normalTagIds,
+              );
+            } else if (widget.editingTransactionId != null) {
+              // 编辑模式没主表 tag → 清掉旧主表关联
+              await repo.removeAllTagsFromTransaction(transactionId);
+            }
 
-          }
-          // 更新标签关联
-          // §7 共享账本:tag.id < 0 是 synthetic(Owner tag from SharedLedger*),
-          // 主表 Tags 没该行,不能直接写 transaction_tags.tag_id。分两类:
-          // - 正数 id → 写 transaction_tags 主表(老路径)
-          // - 负数 id → 走 SharedLedgerTags 反查 syncId → 写 transaction_tag_overrides
-          final normalTagIds = res.tagIds.where((id) => id >= 0).toList();
-          final syntheticTagIds = res.tagIds.where((id) => id < 0).toList();
-
-          if (normalTagIds.isNotEmpty) {
-            await repo.updateTransactionTags(
-              transactionId: transactionId,
-              tagIds: normalTagIds,
-            );
-          } else if (widget.editingTransactionId != null) {
-            // 编辑模式没主表 tag → 清掉旧主表关联
-            await repo.removeAllTagsFromTransaction(transactionId);
-          }
-
-          // §7 写 override:先反查 tx.syncId + 把 synthetic tag_id 翻译成
-          // Owner tag syncId,再 upsert 进 TransactionTagOverrides
-          if (repo is LocalRepository) {
-            final txRow = await (repo.db.select(repo.db.transactions)
-                  ..where((t) => t.id.equals(transactionId)))
-                .getSingleOrNull();
-            final txSyncId = txRow?.syncId;
-            if (txSyncId != null) {
-              await (repo.db.delete(repo.db.transactionTagOverrides)
-                    ..where((t) => t.transactionSyncId.equals(txSyncId)))
-                  .go();
-              if (syntheticTagIds.isNotEmpty) {
-                final allShared =
-                    await repo.db.select(repo.db.sharedLedgerTags).get();
-                final now = DateTime.now().toUtc();
-                for (final sid in syntheticTagIds) {
-                  for (final s in allShared) {
-                    if (syntheticIdForSyncId(s.syncId) == sid) {
-                      await repo.db
-                          .into(repo.db.transactionTagOverrides)
-                          .insert(
-                        TransactionTagOverridesCompanion.insert(
-                          transactionSyncId: txSyncId,
-                          tagSyncId: s.syncId,
-                          createdAt: now,
-                        ),
-                      );
-                      break;
+            // §7 写 override:先反查 tx.syncId + 把 synthetic tag_id 翻译成
+            // Owner tag syncId,再 upsert 进 TransactionTagOverrides
+            if (repo is LocalRepository) {
+              final txRow = await (repo.db.select(repo.db.transactions)
+                    ..where((t) => t.id.equals(transactionId)))
+                  .getSingleOrNull();
+              final txSyncId = txRow?.syncId;
+              if (txSyncId != null) {
+                await (repo.db.delete(repo.db.transactionTagOverrides)
+                      ..where((t) => t.transactionSyncId.equals(txSyncId)))
+                    .go();
+                if (syntheticTagIds.isNotEmpty) {
+                  final allShared = await (repo.db.select(repo.db.sharedLedgerTags)
+                        ..where((t) => t.ledgerSyncId.equals(ledger.syncId ?? '')))
+                      .get();
+                  final now = DateTime.now().toUtc();
+                  for (final sid in syntheticTagIds.toSet()) {
+                    var found = false;
+                    for (final s in allShared) {
+                      if (syntheticIdForSyncId(s.syncId) == sid) {
+                        await repo.db
+                            .into(repo.db.transactionTagOverrides)
+                            .insert(
+                          TransactionTagOverridesCompanion.insert(
+                            transactionSyncId: txSyncId,
+                            tagSyncId: s.syncId,
+                            createdAt: now,
+                          ),
+                        );
+                        found = true;
+                        break;
+                      }
                     }
+                    if (!found) throw StateError('tag_not_found');
                   }
                 }
-                  }
-              // 这里**不再**重复 recordLedgerChange(transaction:update)。
-              // 之前为了"override 变化也走 push"专门补一条 update,但
-              // - addTransaction / updateTransaction 已经登记过一次 change
-              // - _serializeEntityForPush('transaction') 在 push 时**统一**读 DB
-              //   最新状态(包括 transaction_tag_overrides 表),payload 自然含
-              //   最新 overrides
-              // 结论:那条补登记的 update 跟前面的 create/update 推同样 payload,
-              // 服务端 sync_changes 表凭空多一条 row(已观察到共享账本 Editor
-              // 创建 tx 时 1 秒内 2 条 identical upsert)。直接砍。
+                // 这里**不再**重复 recordLedgerChange(transaction:update)。
+                // 之前为了"override 变化也走 push"专门补一条 update,但
+                // - addTransaction / updateTransaction 已经登记过一次 change
+                // - _serializeEntityForPush('transaction') 在 push 时**统一**读 DB
+                //   最新状态(包括 transaction_tag_overrides 表),payload 自然含
+                //   最新 overrides
+                // 结论:那条补登记的 update 跟前面的 create/update 推同样 payload,
+                // 服务端 sync_changes 表凭空多一条 row(已观察到共享账本 Editor
+                // 创建 tx 时 1 秒内 2 条 identical upsert)。直接砍。
+              }
             }
-          }
             return transactionId;
           }
           final transactionId = repo is LocalRepository
               ? await repo.db.transaction(persist)
               : await persist();
-          if (widget.editingTransactionId != null) {
-            await TxAuthorService.markEdited(ref, transactionId);
-          } else {
-            await TxAuthorService.markCreated(ref, transactionId);
-          }
+          await PostProcessor.afterCommit(() async {
+            if (widget.editingTransactionId != null) {
+              await TxAuthorService.markEditedC(editContainer, transactionId);
+            } else {
+              await TxAuthorService.markCreatedC(editContainer, transactionId);
+            }
+          });
           var attachmentFailed = false;
           if (res.pendingAttachments.isNotEmpty) {
             try {
@@ -445,43 +449,48 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
               // The bill is already committed; never report it as unsaved.
               attachmentFailed = true;
             }
-            ref.read(attachmentListRefreshProvider.notifier).state++;
           }
-          ref.read(tagListRefreshProvider.notifier).state++;
-          final saveWarning = attachmentFailed
-              ? attachmentWarning
-              : null;
-          // 统一处理：自动/手动同步与状态刷新（后台静默）
-          PostProcessor.sync(ref, ledgerId: ledgerId);
-          // 刷新：账本笔数与全局统计
-          ref.invalidate(countsForLedgerProvider(ledgerId));
-          ref.read(statsRefreshProvider.notifier).state++;
-          // 刷新：预算数据
-          ref.read(budgetRefreshProvider.notifier).state++;
-          // 更新小组件数据（后台执行，不阻塞UI）
-          if (context.mounted) {
-            updateAppWidget(ref, context);
-          }
-          if (saveWarning != null && context.mounted) {
-            showToast(context, saveWarning, duration: const Duration(seconds: 5));
-          }
-          // 双击完成：只收起金额面板，保留分类选择页供下一笔使用。
-          // 普通完成：按原流程关闭金额面板和分类选择页。
-          if (ctx.mounted && Navigator.of(ctx).canPop()) Navigator.of(ctx).pop();
-          if (!res.continueAdding &&
-              context.mounted &&
-              Navigator.of(context).canPop()) {
-            Navigator.of(context).pop();
-          }
-          if (res.continueAdding && !attachmentFailed && context.mounted) {
-            showToast(
-              context,
-              AppLocalizations.of(context).transactionSavedNextCategory,
+          // The bill is committed. Cache, sync and UI failures must not escape
+          // to the input sheet as a failed save and cause a duplicate retry.
+          await PostProcessor.afterCommit(() async {
+            editContainer.invalidate(countsForLedgerProvider(ledgerId));
+            await PostProcessor.runC(
+              editContainer,
+              ledgerId: ledgerId,
+              tags: true,
+              attachments: res.pendingAttachments.isNotEmpty,
             );
+          });
+          if (mounted && context.mounted) {
+            // Keep widget rendering in the background, as before this fix.
+            PostProcessor.afterCommit(() => updateAppWidget(ref, context));
           }
-          // 反馈：轻微触感 + 系统点击音
-          HapticFeedback.lightImpact();
-          SystemSound.play(SystemSoundType.click);
+          if (!mounted || !context.mounted || !ctx.mounted) return;
+          if (attachmentFailed) {
+            await PostProcessor.afterCommit(() async {
+              showToast(context, attachmentWarning,
+                  duration: const Duration(seconds: 5));
+            });
+          }
+          await PostProcessor.afterCommit(() async {
+            // Double-tap keeps the category picker for the next bill.
+            if (ctx.mounted && Navigator.of(ctx).canPop()) {
+              Navigator.of(ctx).pop();
+            }
+            if (!res.continueAdding && context.mounted &&
+                Navigator.of(context).canPop()) {
+              Navigator.of(context).pop();
+            }
+          });
+          if (res.continueAdding && !attachmentFailed && context.mounted) {
+            await PostProcessor.afterCommit(() async {
+              showToast(context, l10n.transactionSavedNextCategory);
+            });
+          }
+          await PostProcessor.afterCommit(() async {
+            await HapticFeedback.lightImpact();
+            await SystemSound.play(SystemSoundType.click);
+          });
         },
       ),
       ),

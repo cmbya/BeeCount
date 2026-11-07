@@ -592,7 +592,7 @@ class _AmountEditorSheetState extends ConsumerState<AmountEditorSheet> {
 
     final current = double.tryParse(_amountStr) ?? 0.0;
     final total = _op == null ? current : _compute(_acc, _op!, current);
-    if (total.abs() <= 0) return;
+    if (!total.isFinite || total.abs() <= 0) return;
 
     setState(() => _isSubmitting = true);
 
@@ -616,26 +616,33 @@ class _AmountEditorSheetState extends ConsumerState<AmountEditorSheet> {
 
     HapticFeedback.lightImpact();
     SystemSound.play(SystemSoundType.click);
+    var submitted = false;
     try {
       await widget.onSubmit((
-      amount: total.abs(), // 始终正数
-      continueAdding: continueAdding,
-      note: _noteCtrl.text.isEmpty ? null : _noteCtrl.text,
-      date: _date,
-      accountId: _selectedAccountId,
-      tagIds: _selectedTagIds,
-      pendingAttachments: _pendingAttachments,
-      excludeFromStats: _excludeFromStats,
-      excludeFromBudget: _excludeFromBudget,
-      currencyCode: txCurrency,
-      nativeAmount: nativeAmount,
+        amount: total.abs(), // 始终正数
+        continueAdding: continueAdding,
+        note: _noteCtrl.text.isEmpty ? null : _noteCtrl.text,
+        date: _date,
+        accountId: _selectedAccountId,
+        tagIds: _selectedTagIds,
+        pendingAttachments: _pendingAttachments,
+        excludeFromStats: _excludeFromStats,
+        excludeFromBudget: _excludeFromBudget,
+        currencyCode: txCurrency,
+        nativeAmount: nativeAmount,
       ));
+      submitted = true;
     } catch (_) {
       if (mounted) {
-        showToast(context, AppLocalizations.of(context).transactionDetailSaveFailed);
+        showToast(
+          context,
+          AppLocalizations.of(context).transactionDetailSaveFailed,
+        );
       }
     } finally {
-      if (mounted) setState(() => _isSubmitting = false);
+      // A successful callback may leave the sheet mounted during navigation.
+      // Keep it locked so post-commit UI issues cannot create a second bill.
+      if (mounted && !submitted) setState(() => _isSubmitting = false);
     }
   }
 

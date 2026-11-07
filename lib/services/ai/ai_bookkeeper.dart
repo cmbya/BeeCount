@@ -156,8 +156,9 @@ class AiBookkeeper {
         if (onSaved != null) {
           try {
             await onSaved(txId, txIds.length);
-          } catch (e, st) {
-            logger.error(_tag, 'onSaved 回调异常,不影响主流程', e, st);
+          } catch (e) {
+            logger.warning(_tag,
+                'onSaved 回调异常,账单已保存 (${e.runtimeType})');
           }
         }
 
@@ -167,16 +168,17 @@ class AiBookkeeper {
         BillInfo enriched;
         try {
           enriched = await _enrichWithActualNames(bill, txId);
-        } catch (e, st) {
-          logger.error(_tag, 'enrichWithActualNames 异常,用 AI 原始 BillInfo',
-              e, st);
+        } catch (e) {
+          logger.warning(_tag,
+              'enrichWithActualNames 异常,用 AI 原始结果 (${e.runtimeType})');
           enriched = bill;
         }
         saved.add(enriched);
         txIds.add(txId);
-      } catch (e, st) {
+      } catch (e) {
         failed++;
-        logger.error(_tag, '第 ${i + 1} 笔创建异常', e, st);
+        logger.warning(_tag,
+            '第 ${i + 1} 笔创建异常 (${e.runtimeType})');
       }
     }
 

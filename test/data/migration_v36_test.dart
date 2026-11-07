@@ -88,6 +88,7 @@ void main() {
       await db.customStatement(
           "INSERT INTO ledgers(id, name, currency) VALUES(1, 'old', 'CNY')");
       await db.customStatement('ALTER TABLE ledgers DROP COLUMN month_start_day');
+      await db.customStatement('PRAGMA user_version = 26');
       db.failUpgrade = true;
       await expectLater(
         db.migration.onUpgrade!(db.createMigrator(), 26, 36),
@@ -96,9 +97,13 @@ void main() {
       final columns = await db.customSelect('PRAGMA table_info(ledgers)').get();
       expect(columns.map((r) => r.read<String>('name')),
           isNot(contains('month_start_day')));
+      expect((await db.customSelect('PRAGMA user_version').getSingle())
+          .read<int>('user_version'), 26);
       db.failUpgrade = false;
       await db.migration.onUpgrade!(db.createMigrator(), 26, 36);
       expect((await db.select(db.ledgers).get()).single.monthStartDay, 1);
+      expect((await db.customSelect('PRAGMA user_version').getSingle())
+          .read<int>('user_version'), 36);
     } finally {
       await db.close();
     }

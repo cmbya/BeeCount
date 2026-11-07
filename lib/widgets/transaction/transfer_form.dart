@@ -200,14 +200,15 @@ class _TransferFormState extends ConsumerState<TransferForm> {
               ? await _resolveSyncIdByAccountId(_toAccountId!, ledgerId)
               : null;
 
-          try {
+          Future<int> persist() async {
+            final int transactionId;
             if (widget.editingTransactionId != null) {
-              // 编辑模式：更新现有转账记录
+              transactionId = widget.editingTransactionId!;
               await repo.updateTransaction(
-                id: widget.editingTransactionId!,
+                id: transactionId,
                 type: 'transfer',
                 amount: result.amount,
-                categoryId: transferCategoryId, // 使用虚拟转账分类ID
+                categoryId: transferCategoryId,
                 note: result.note,
                 happenedAt: result.date,
                 excludeFromStats: result.excludeFromStats,
@@ -217,58 +218,18 @@ class _TransferFormState extends ConsumerState<TransferForm> {
                 accountId: d.Value<int?>(fromAccountForAdd),
                 accountSyncIdOverride: fromOverride,
               );
-              // 更新 toAccountId(同时写 toAccountSyncIdOverride,共享账本场景)
               await repo.updateTransactionFields(
-                id: widget.editingTransactionId!,
+                id: transactionId,
                 toAccountId: d.Value<int?>(toAccountForAdd),
                 toAccountSyncIdOverride: toOverride,
                 writeToAccountSyncIdOverride: true,
               );
-              // 共享账本:回填编辑人,UI 头像组立即展示
-              await TxAuthorService.markEdited(
-                  ref, widget.editingTransactionId!);
-              // 更新标签
-              if (result.tagIds.isNotEmpty) {
-                await repo.updateTransactionTags(
-                  transactionId: widget.editingTransactionId!,
-                  tagIds: result.tagIds,
-                );
-                // 刷新标签列表缓存
-                ref.read(tagListRefreshProvider.notifier).state++;
-              } else {
-                // 编辑模式：如果没有选择标签，清除原有标签
-                await repo.removeAllTagsFromTransaction(widget.editingTransactionId!);
-                ref.read(tagListRefreshProvider.notifier).state++;
-              }
-
-              // 保存待上传的附件
-              if (result.pendingAttachments.isNotEmpty) {
-                await attachmentService.saveAttachments(
-                  transactionId: widget.editingTransactionId!,
-                  sourceFiles: result.pendingAttachments,
-                  startIndex: 0,
-                );
-                // 刷新附件列表缓存
-                ref.read(attachmentListRefreshProvider.notifier).state++;
-              }
-
-              // 统一处理：自动/手动同步与状态刷新
-              await PostProcessor.sync(ref, ledgerId: ledgerId);
-              // 刷新统计
-              ref.invalidate(countsForLedgerProvider(ledgerId));
-              ref.read(statsRefreshProvider.notifier).state++;
-
-              if (!context.mounted) return;
-              Navigator.of(context).pop(); // 关闭金额输入弹窗
-              showToast(context, l10n.transferUpdateSuccess);
-              widget.onTransferComplete();
             } else {
-              // 创建模式：新建转账记录
-              final txId = await repo.addTransaction(
+              transactionId = await repo.addTransaction(
                 ledgerId: ledgerId,
                 type: 'transfer',
                 amount: result.amount,
-                categoryId: transferCategoryId, // 使用虚拟转账分类ID
+                categoryId: transferCategoryId,
                 accountId: fromAccountForAdd,
                 toAccountId: toAccountForAdd,
                 accountSyncIdOverride: fromOverride,
@@ -280,54 +241,95 @@ class _TransferFormState extends ConsumerState<TransferForm> {
                 currencyCode: result.currencyCode,
                 nativeAmount: result.nativeAmount,
               );
-              // 共享账本:本地立即标记创建人 + 编辑人
-              await TxAuthorService.markCreated(ref, txId);
-
-              // 关联标签
-              if (result.tagIds.isNotEmpty) {
-                await repo.updateTransactionTags(
-                  transactionId: txId,
-                  tagIds: result.tagIds,
-                );
-                // 刷新标签列表缓存
-                ref.read(tagListRefreshProvider.notifier).state++;
+            }
+            final normalTags = result.tagIds.where((id) => id >= 0).toList();
+            await repo.updateTransactionTags(
+              transactionId: transactionId,
+              tagIds: normalTags,
+            );
+            // Shared tags stay references to the owner's App data, just as in
+            // the expense/income editor. Never insert a synthetic negative ID.
+            if (repo is LocalRepository) {
+              final tx = await repo.getTransactionById(transactionId);
+              if (tx?.syncId != null) {
+                await (repo.db.delete(repo.db.transactionTagOverrides)
+                      ..where((r) => r.transactionSyncId.equals(tx!.syncId!)))
+                    .go();
+                final selected = result.tagIds.where((id) => id < 0).toSet();
+                if (selected.isNotEmpty) {
+                  final sharedTags = await (repo.db.select(repo.db.sharedLedgerTags)
+                        ..where((r) => r.ledgerSyncId.equals(ledger.syncId ?? '')))
+                      .get();
+                  for (final tag in sharedTags) {
+                    if (selected.remove(syntheticIdForSyncId(tag.syncId))) {
+                      await repo.db.into(repo.db.transactionTagOverrides).insert(
+                        TransactionTagOverridesCompanion.insert(
+                          transactionSyncId: tx!.syncId!,
+                          tagSyncId: tag.syncId,
+                          createdAt: DateTime.now().toUtc(),
+                        ),
+                      );
+                    }
+                  }
+                  if (selected.isNotEmpty) throw StateError('tag_not_found');
+                }
               }
+            }
+            return transactionId;
+          }
 
-              // 保存待上传的附件
-              if (result.pendingAttachments.isNotEmpty) {
-                await attachmentService.saveAttachments(
-                  transactionId: txId,
-                  sourceFiles: result.pendingAttachments,
-                  startIndex: 0,
-                );
-                // 刷新附件列表缓存
-                ref.read(attachmentListRefreshProvider.notifier).state++;
-              }
-
-              // 统一处理：自动/手动同步与状态刷新
-              await PostProcessor.sync(ref, ledgerId: ledgerId);
-              // 刷新统计
-              ref.invalidate(countsForLedgerProvider(ledgerId));
-              ref.read(statsRefreshProvider.notifier).state++;
-
-              if (!context.mounted) return;
-              Navigator.of(context).pop(); // 关闭金额输入弹窗
-              showToast(context, l10n.transferCreateSuccess);
-
-              // 重置状态
+          // Only failures before this commit may return to the sheet for retry.
+          final transactionId = repo is LocalRepository
+              ? await repo.db.transaction(persist)
+              : await persist();
+          await PostProcessor.afterCommit(() async {
+            if (widget.editingTransactionId != null) {
+              await TxAuthorService.markEditedC(editContainer, transactionId);
+            } else {
+              await TxAuthorService.markCreatedC(editContainer, transactionId);
+            }
+          });
+          var attachmentFailed = false;
+          if (result.pendingAttachments.isNotEmpty) {
+            try {
+              final saved = await attachmentService.saveAttachmentsWithResult(
+                transactionId: transactionId,
+                sourceFiles: result.pendingAttachments,
+              );
+              attachmentFailed = !saved.isComplete;
+            } catch (_) {
+              attachmentFailed = true;
+            }
+          }
+          await PostProcessor.afterCommit(() async {
+            editContainer.invalidate(countsForLedgerProvider(ledgerId));
+            await PostProcessor.runC(
+              editContainer,
+              ledgerId: ledgerId,
+              tags: true,
+              attachments: result.pendingAttachments.isNotEmpty,
+            );
+          });
+          if (!mounted || !context.mounted) return;
+          await PostProcessor.afterCommit(() async {
+            // Use the owning form context, not the sheet being popped.
+            showToast(this.context, attachmentFailed
+                ? l10n.transactionAttachmentsPartial
+                : widget.editingTransactionId != null
+                    ? l10n.transferUpdateSuccess
+                    : l10n.transferCreateSuccess,
+                duration: Duration(seconds: attachmentFailed ? 5 : 2));
+          });
+          await PostProcessor.afterCommit(() async {
+            if (context.mounted) Navigator.of(context).pop();
+            if (mounted && widget.editingTransactionId == null) {
               setState(() {
                 _fromAccountId = null;
                 _toAccountId = null;
               });
-
-              widget.onTransferComplete();
             }
-          } catch (e) {
-            if (context.mounted) {
-              Navigator.of(context).pop();
-              showToast(context, '${l10n.commonError}: $e');
-            }
-          }
+            if (mounted) widget.onTransferComplete();
+          });
         },
       ),
       ),

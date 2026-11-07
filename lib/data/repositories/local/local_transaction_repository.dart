@@ -11,7 +11,6 @@ import '../../../utils/month_range.dart';
 import '../../../utils/shared_ledger_picker_filter.dart';
 import '../../../models/note_history.dart';
 import '../transaction_repository.dart';
-import '../../../services/system/logger_service.dart';
 
 /// 本地交易Repository实现
 /// 基于 Drift 数据库实现
@@ -630,68 +629,42 @@ class LocalTransactionRepository implements TransactionRepository {
   }
 
   @override
-  Future<void> deleteTransaction(int id) async {
-    // 先删除关联的标签
-    await (db.delete(db.transactionTags)
-          ..where((tt) => tt.transactionId.equals(id)))
-        .go();
+  Future<void> deleteTransaction(int id) => db.transaction(() async {
+        await (db.delete(db.transactionTags)
+              ..where((tt) => tt.transactionId.equals(id)))
+            .go();
+        await _deleteAttachmentsForTransaction(id);
+        await (db.delete(db.transactions)..where((t) => t.id.equals(id))).go();
+      });
 
-    // 再删除关联的附件
-    await _deleteAttachmentsForTransaction(id);
-
-    // 最后删除交易记录
-    await (db.delete(db.transactions)..where((t) => t.id.equals(id))).go();
-  }
-
-  /// 删除交易关联的所有附件（包括文件和数据库记录）
+  /// Database rows roll back with the transaction; files are deleted only after
+  /// its outermost commit, never while a later statement can still fail.
   Future<void> _deleteAttachmentsForTransaction(int transactionId) async {
-    try {
-      // 获取该交易的所有附件
-      final attachments = await (db.select(db.transactionAttachments)
-            ..where((a) => a.transactionId.equals(transactionId)))
-          .get();
-
-      if (attachments.isEmpty) return;
-
-      // 获取附件存储目录
+    final attachments = await (db.select(db.transactionAttachments)
+          ..where((a) => a.transactionId.equals(transactionId)))
+        .get();
+    if (attachments.isEmpty) return;
+    final fileNames = attachments.map((a) => a.fileName).toSet();
+    await (db.delete(db.transactionAttachments)
+          ..where((a) => a.transactionId.equals(transactionId)))
+        .go();
+    await db.afterSuccessfulTransaction(() async {
       final appDir = await getApplicationDocumentsDirectory();
-      final attachmentDir = Directory('${appDir.path}/attachments');
       final cacheDir = await getTemporaryDirectory();
-      final thumbDir = Directory('${cacheDir.path}/attachment_thumbs');
-
-      final fileNames = attachments.map((a) => a.fileName).toSet();
-
-      // 先删数据库记录,再按引用计数删物理文件:多笔共享同一文件时,仅当没有
-      // 其他行引用该 fileName 才删物理文件,避免误删别笔还在用的图。
-      await (db.delete(db.transactionAttachments)
-            ..where((a) => a.transactionId.equals(transactionId)))
-          .go();
-
       for (final fileName in fileNames) {
-        final stillRef = await (db.select(db.transactionAttachments)
-              ..where((a) => a.fileName.equals(fileName)))
+        // Recheck after commit: another bill may still share this same file.
+        final referenced = await (db.select(db.transactionAttachments)
+              ..where((a) => a.fileName.equals(fileName))
+              ..limit(1))
             .getSingleOrNull();
-        if (stillRef != null) continue; // 仍有其他行引用,保留物理文件
-
-        final file = File('${attachmentDir.path}/$fileName');
-        if (await file.exists()) {
-          await file.delete();
-          logger.debug('LocalTransactionRepository', '删除附件文件: $fileName');
-        }
-        final thumbName =
-            '${path.basenameWithoutExtension(fileName)}_thumb.jpg';
-        final thumbFile = File('${thumbDir.path}/$thumbName');
-        if (await thumbFile.exists()) {
-          await thumbFile.delete();
-        }
+        if (referenced != null) continue;
+        final file = File('${appDir.path}/attachments/$fileName');
+        if (await file.exists()) await file.delete();
+        final thumbName = '${path.basenameWithoutExtension(fileName)}_thumb.jpg';
+        final thumb = File('${cacheDir.path}/attachment_thumbs/$thumbName');
+        if (await thumb.exists()) await thumb.delete();
       }
-
-      logger.info('LocalTransactionRepository',
-          '已删除交易 $transactionId 的 ${attachments.length} 个附件');
-    } catch (e, stackTrace) {
-      logger.error('LocalTransactionRepository', '删除交易附件失败', e, stackTrace);
-      // 不抛出异常，继续删除交易
-    }
+    });
   }
 
   @override

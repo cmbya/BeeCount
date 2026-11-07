@@ -2889,24 +2889,25 @@ class LocalRepository extends BaseRepository {
     int sortOrder = 0,
     String? cloudFileId,
     String? cloudSha256,
-  }) async {
-    final id = await _attachmentRepo.createAttachment(
-      transactionId: transactionId,
-      fileName: fileName,
-      originalName: originalName,
-      fileSize: fileSize,
-      width: width,
-      height: height,
-      sortOrder: sortOrder,
-      cloudFileId: cloudFileId,
-      cloudSha256: cloudSha256,
-    );
-    // 附件本身不走 sync_change 表（server 通过 tx payload 里的 attachments
-    // 数组下发），但必须给父 tx 登记一条 update change，否则另一台设备永远
-    // 收不到"这条 tx 多了附件"的通知。
-    await _recordTransactionUpdateForAttachmentChange(transactionId);
-    return id;
-  }
+  }) =>
+      db.transaction(() async {
+        final id = await _attachmentRepo.createAttachment(
+          transactionId: transactionId,
+          fileName: fileName,
+          originalName: originalName,
+          fileSize: fileSize,
+          width: width,
+          height: height,
+          sortOrder: sortOrder,
+          cloudFileId: cloudFileId,
+          cloudSha256: cloudSha256,
+        );
+        // 附件本身不走 sync_change 表（server 通过 tx payload 里的 attachments
+        // 数组下发），但必须给父 tx 登记一条 update change，否则另一台设备永远
+        // 收不到"这条 tx 多了附件"的通知。
+        await _recordTransactionUpdateForAttachmentChange(transactionId);
+        return id;
+      });
 
   @override
   Future<TransactionAttachment?> getAttachmentById(int id) =>
@@ -2918,21 +2919,23 @@ class LocalRepository extends BaseRepository {
       _attachmentRepo.getAttachmentsByTransaction(transactionId);
 
   @override
-  Future<void> deleteAttachment(int id) async {
-    // 在真正删除之前读出 transactionId，删除后登记父 tx update，让 B 端 pull
-    // 下去也能看到附件已被移除。
-    final row = await _attachmentRepo.getAttachmentById(id);
-    await _attachmentRepo.deleteAttachment(id);
-    if (row != null) {
-      await _recordTransactionUpdateForAttachmentChange(row.transactionId);
-    }
-  }
+  Future<void> deleteAttachment(int id) =>
+      db.transaction(() async {
+        // 在真正删除之前读出 transactionId，删除后登记父 tx update，让 B 端 pull
+        // 下去也能看到附件已被移除。
+        final row = await _attachmentRepo.getAttachmentById(id);
+        await _attachmentRepo.deleteAttachment(id);
+        if (row != null) {
+          await _recordTransactionUpdateForAttachmentChange(row.transactionId);
+        }
+      });
 
   @override
-  Future<void> deleteAttachmentsByTransaction(int transactionId) async {
-    await _attachmentRepo.deleteAttachmentsByTransaction(transactionId);
-    await _recordTransactionUpdateForAttachmentChange(transactionId);
-  }
+  Future<void> deleteAttachmentsByTransaction(int transactionId) =>
+      db.transaction(() async {
+        await _attachmentRepo.deleteAttachmentsByTransaction(transactionId);
+        await _recordTransactionUpdateForAttachmentChange(transactionId);
+      });
 
   /// 附件增删触发父 tx 的 update change，让 push 侧重序列化 tx payload
   /// （带上新 attachments 数组）推到 server，B 端 pull 后同步到视图。

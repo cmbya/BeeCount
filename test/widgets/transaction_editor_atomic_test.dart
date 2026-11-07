@@ -34,6 +34,7 @@ void main() {
       syncServiceProvider.overrideWithValue(LocalOnlySyncService()),
       beecountCloudProviderInstance.overrideWith((ref) async => null),
     ]);
+    addTearDown(() async { c.dispose(); await db.close(); });
     await tester.pumpWidget(UncontrolledProviderScope(container: c,
       child: MaterialApp(locale: const Locale('zh'),
         localizationsDelegates: AppLocalizations.localizationsDelegates,
@@ -46,9 +47,9 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(AmountEditorSheet), findsOneWidget);
     final sheet = tester.widget<AmountEditorSheet>(find.byType(AmountEditorSheet));
-    final result = (amount: 10.0, continueAdding: false, note: 'manual',
+    final AmountEditorResult result = (amount: 10.0, continueAdding: false, note: 'manual',
       date: DateTime(2026, 11, 8), accountId: null, tagIds: [tag],
-      pendingAttachments: <Never>[], excludeFromStats: false,
+      pendingAttachments: [], excludeFromStats: false,
       excludeFromBudget: false, currencyCode: 'CNY', nativeAmount: 10.0);
     await tester.runAsync(() async {
       await expectLater(Future.sync(() => sheet.onSubmit(result)), throwsA(isA<Exception>()));
@@ -64,7 +65,5 @@ void main() {
     await tester.pumpAndSettle();
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 3));
-    c.dispose();
-    await db.close();
   });
 }

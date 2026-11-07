@@ -20,6 +20,7 @@ void main() {
     final row = await repo.getLedgerById(ledger);
     final pending = Completer<void>();
     var calls = 0;
+    addTearDown(db.close);
     await tester.pumpWidget(ProviderScope(overrides: [
       repositoryProvider.overrideWithValue(repo),
       currentLedgerIdProvider.overrideWith((ref) => ledger),
@@ -35,19 +36,26 @@ void main() {
       )),
     )));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('完成'));
+    final finish = find.widgetWithText(InkWell, '完成').last;
+    final finishLocation = tester.getCenter(finish);
+    await tester.tapAt(finishLocation);
     await tester.pump();
     expect(calls, 1);
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    await tester.tapAt(finishLocation);
+    await tester.pump();
+    expect(calls, 1);
     pending.completeError(StateError('save failed'));
     await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
     expect(find.text('保存失败，请检查所选资料、编辑权限及有效汇率。'), findsOneWidget);
-    await tester.tap(find.text('完成'));
-    await tester.pumpAndSettle();
+    await tester.tapAt(finishLocation);
+    await tester.pump();
     expect(calls, 2);
+    await tester.tapAt(finishLocation);
+    await tester.pump();
+    expect(calls, 2, reason: 'a committed callback must stay locked');
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 3));
-    await db.close();
   });
 }

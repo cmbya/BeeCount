@@ -9,6 +9,7 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 
 import '../data/db.dart';
+import '../data/repositories/local/local_repository.dart';
 import '../providers.dart';
 import 'system/logger_service.dart';
 
@@ -214,11 +215,19 @@ class AttachmentService {
     final saved = <TransactionAttachment>[];
     final failedIndexes = <int>[];
     for (var i = 0; i < sourceFiles.length; i++) {
-      final attachment = await saveAttachment(
-        transactionId: transactionId,
-        sourceFile: sourceFiles[i],
-        index: startIndex + i,
-      );
+      TransactionAttachment? attachment;
+      try {
+        attachment = await saveAttachment(
+          transactionId: transactionId,
+          sourceFile: sourceFiles[i],
+          index: startIndex + i,
+        );
+      } catch (error) {
+        // Keep trying later images even if a platform/service implementation
+        // throws instead of returning null. Never retry the bill itself.
+        logger.warning('AttachmentService',
+            '附件保存未完成 (${error.runtimeType})');
+      }
       if (attachment == null) {
         failedIndexes.add(startIndex + i);
       } else {
@@ -250,15 +259,19 @@ class AttachmentService {
   /// 时才删物理文件 + 缩略图。多笔/多次共享同一张图时避免误删。
   Future<void> _deletePhysicalFileIfUnreferenced(String fileName) async {
     final repo = ref.read(repositoryProvider);
-    final refCount = await repo.countAttachmentsByFileName(fileName);
-    if (refCount > 0) return; // 仍有其他行引用,保留物理文件
-    final dir = await getAttachmentDirectory();
-    final file = File('${dir.path}/$fileName');
-    if (await file.exists()) {
-      await file.delete();
-      logger.debug('AttachmentService', '已删除原图: $fileName');
+    Future<void> cleanup() async {
+      final refCount = await repo.countAttachmentsByFileName(fileName);
+      if (refCount > 0) return;
+      final dir = await getAttachmentDirectory();
+      final file = File('${dir.path}/$fileName');
+      if (await file.exists()) await file.delete();
+      await _deleteThumbnail(fileName);
     }
-    await _deleteThumbnail(fileName);
+    if (repo is LocalRepository) {
+      await repo.db.afterSuccessfulTransaction(cleanup);
+    } else {
+      await cleanup();
+    }
   }
 
   /// 对一组 fileName 逐个按引用计数删物理文件(清空/删账本后,精准清理该账本

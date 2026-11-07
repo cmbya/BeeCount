@@ -11,6 +11,7 @@ import 'package:beecount/data/db.dart';
 import 'package:beecount/data/repositories/local/local_repository.dart';
 import 'package:beecount/services/ai/ai_bookkeeper.dart';
 import 'package:beecount/services/billing/bill_creation_service.dart';
+import 'package:beecount/services/system/logger_service.dart';
 
 /// 可编程的 fake engine。不做 AI 调用,直接返回预设的 bills。
 class _FakeEngine implements AiExtractionEngine {
@@ -65,6 +66,25 @@ void main() {
 
   tearDown(() async {
     await db.close();
+  });
+
+  test('tag failure is counted as failed without leaving an orphan bill', () async {
+    await db.customStatement("""
+      CREATE TRIGGER fail_ai_tag BEFORE INSERT ON transaction_tags
+      BEGIN SELECT RAISE(ABORT, 'private-database-error'); END
+    """);
+    final engine = _FakeEngine(bills: [BillInfo(amount: 12,
+      time: DateTime(2026, 11, 8), tags: ['tag'])]);
+    final bookkeeper = AiBookkeeper(repository: repo, engine: engine, persister: persister);
+    final result = await bookkeeper.fromText(text: 'private', ledgerId: ledgerId,
+        billingTypes: const []);
+    expect(result.failedCount, 1);
+    expect(result.transactionIds, isEmpty);
+    expect(await db.select(db.transactions).get(), isEmpty);
+    final logs = logger.logs.where((l) => l.tag == 'AiBookkeeper')
+        .map((l) => l.toFormattedString()).join();
+    expect(logs, contains('创建异常'));
+    expect(logs, isNot(contains('private-database-error')));
   });
 
   group('AiBookkeeper.fromText', () {

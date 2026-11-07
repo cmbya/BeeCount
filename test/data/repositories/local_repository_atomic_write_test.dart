@@ -76,6 +76,31 @@ void main() {
     expect(await db.select(db.transactions).get(), isEmpty);
   });
 
+  test('attachment insert rolls back when its outbox update fails', () async {
+    final id = await add();
+    await db.delete(db.localChanges).go();
+    await rejectOutbox('update');
+    await expectLater(repo.createAttachment(transactionId: id, fileName: 'image.png'),
+        throwsA(isA<Exception>()));
+    expect(await db.select(db.transactionAttachments).get(), isEmpty);
+    expect(await repo.getTransactionById(id), isNotNull);
+    expect(await db.select(db.localChanges).get(), isEmpty);
+  });
+
+  test('attachment removal rolls back when its outbox update fails', () async {
+    final id = await add();
+    final attachment = await repo.createAttachment(
+        transactionId: id, fileName: 'image.png');
+    await db.delete(db.localChanges).go();
+    await rejectOutbox('update');
+    await expectLater(repo.deleteAttachment(attachment), throwsA(isA<Exception>()));
+    expect(await db.select(db.transactionAttachments).get(), hasLength(1));
+    await expectLater(repo.deleteAttachmentsByTransaction(id),
+        throwsA(isA<Exception>()));
+    expect(await db.select(db.transactionAttachments).get(), hasLength(1));
+    expect(await db.select(db.localChanges).get(), isEmpty);
+  });
+
   test('local-only writes still work without an outbox', () async {
     repo = LocalRepository(db);
     final id = await add();

@@ -87,6 +87,16 @@ void main() {
     }
   });
 
+  test('non-finite amounts never create a transaction', () async {
+    for (final value in [double.nan, double.infinity, double.negativeInfinity]) {
+      expect(await service.createFromBill(
+        bill: BillInfo(amount: value, time: DateTime(2026, 11, 8)),
+        ledgerId: ledgerId,
+      ), isNull);
+    }
+    expect(await db.select(db.transactions).get(), isEmpty);
+  });
+
   // ============================================================
   // amount 校验
   // ============================================================

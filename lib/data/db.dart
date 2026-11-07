@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'shortcut_tables.dart';
 import 'dart:ui' show Locale;
@@ -510,6 +511,51 @@ class BeeDatabase extends _$BeeDatabase {
   /// 跳过 [_openConnection] 的文件系统 / 平台副作用。test/ 下的 unit test
   /// 用这个。
   BeeDatabase.forTesting(QueryExecutor executor) : super(executor);
+
+  // File changes cannot be rolled back by SQLite. Nested savepoints keep their
+  // callbacks private until they succeed, then pass them to the outer commit.
+  final Object _afterCommitKey = Object();
+
+  @override
+  Future<T> transaction<T>(Future<T> Function() action,
+      {bool requireNew = false}) async {
+    final parent = Zone.current[_afterCommitKey]
+        as List<Future<void> Function()>?;
+    final callbacks = <Future<void> Function()>[];
+    final result = await super.transaction(
+      () => runZoned(action, zoneValues: {_afterCommitKey: callbacks}),
+      requireNew: requireNew,
+    );
+    if (parent != null) {
+      parent.addAll(callbacks);
+    } else {
+      for (final callback in callbacks) {
+        try {
+          await callback();
+        } catch (error) {
+          // Commit already succeeded; cleanup can be retried by maintenance.
+          try {
+            logger.warning('DB',
+                '提交后清理未完成 (${error.runtimeType})');
+          } catch (_) {}
+        }
+      }
+    }
+    return result;
+  }
+
+  /// Run filesystem cleanup only when the outermost transaction commits.
+  /// Outside a transaction the operation runs immediately.
+  Future<void> afterSuccessfulTransaction(
+      Future<void> Function() operation) async {
+    final callbacks = Zone.current[_afterCommitKey]
+        as List<Future<void> Function()>?;
+    if (callbacks != null) {
+      callbacks.add(operation);
+    } else {
+      await operation();
+    }
+  }
 
   @override
   int get schemaVersion => 36; // v36: 统一新建/升级索引并修复旧库缺失索引
