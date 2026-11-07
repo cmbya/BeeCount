@@ -24,9 +24,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p test-results
-          dart format --output=none lib/data/db.dart lib/data/repositories/local/local_repository.dart lib/services/billing lib/services/ai/ai_bookkeeper.dart lib/services/attachment_service.dart lib/pages/transaction/transaction_editor_page.dart lib/widgets/biz/amount_editor_sheet.dart test/data/migration_v36_test.dart test/data/repositories/local_repository_atomic_write_test.dart test/services/billing/post_processor_budget_test.dart test/services/billing/bill_creation_service_test.dart test/services/attachment_service_test.dart test/widgets/amount_editor_submit_test.dart test/widgets/transaction_editor_atomic_test.dart
+          dart format lib/data/db.dart lib/data/repositories/local/local_repository.dart lib/services/billing lib/services/ai/ai_bookkeeper.dart lib/services/attachment_service.dart lib/pages/transaction/transaction_editor_page.dart lib/widgets/biz/amount_editor_sheet.dart test/data/migration_v36_test.dart test/data/repositories/local_repository_atomic_write_test.dart test/services/billing/post_processor_budget_test.dart test/services/billing/bill_creation_service_test.dart test/services/attachment_service_test.dart test/widgets/amount_editor_submit_test.dart test/widgets/transaction_editor_atomic_test.dart
+          git diff --binary > test-results/format.patch
+          python3 -c "import subprocess,zipfile; paths=subprocess.check_output(['git','diff','--name-only']).decode().splitlines(); z=zipfile.ZipFile('test-results/formatted-sources.zip','w'); [z.write(p,p) for p in paths if p.endswith('.dart')]; z.close()"
           # Existing warnings are recorded; actual analyzer errors fail the job.
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings 2>&1 | tee test-results/analysis.log
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib test 2>&1 | tee test-results/analysis.log
       - name: Run targeted data, billing, widget and shortcut regressions
         shell: bash
         run: |
