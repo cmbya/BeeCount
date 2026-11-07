@@ -149,8 +149,8 @@ struct AutoBillingAppIntent: AppIntent {
 @available(iOS 16.0, *)
 struct AutoBillingShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
-        AppShortcut(intent: PrepareVariableBillingIntent(), phrases: ["用\(.applicationName)准备账单"])
-        AppShortcut(intent: ConfirmVariableBillingIntent(), phrases: ["用\(.applicationName)确认账单"])
+        AppShortcut(intent: PrepareVariableBillingIntent(), phrases: ["用\(.applicationName)确认账单"])
+        AppShortcut(intent: ConfirmVariableBillingIntent(), phrases: ["用\(.applicationName)保存账单"])
     }
 }
 // MARK: - Shared image/text billing helpers
@@ -1219,8 +1219,8 @@ struct VariableBillingDraft: TransientAppEntity {
 @available(iOS 16.0, *)
 struct PrepareVariableBillingIntent: AppIntent {
     static var isDiscoverable = true
-    static var title: LocalizedStringResource = "准备账单"
-    static var description: LocalizedStringResource = "接收已准备的变量，生成待确认账单，不调用 AI、不入账。下一步连接确认并记账。"
+    static var title: LocalizedStringResource = "接收并确认账单"
+    static var description: LocalizedStringResource = "接收变量后直接显示确认菜单；金额和备注点击输入，其他字段仍从 App 选择。提交只输出确认结果，下一步保存账单才入账。"
     static var openAppWhenRun = false
     @Parameter(title: "金额", inputConnectionBehavior: .never) var amount: String?
     @Parameter(title: "类型", inputConnectionBehavior: .never) var type: String?
@@ -1231,83 +1231,92 @@ struct PrepareVariableBillingIntent: AppIntent {
     @Parameter(title: "转出账户", inputConnectionBehavior: .never) var sourceAccount: BillingAccount?
     @Parameter(title: "转入账户", inputConnectionBehavior: .never) var destinationAccount: BillingAccount?
     @Parameter(title: "时间", inputConnectionBehavior: .never) var date: Date?
-    @Parameter(title: "备注", inputConnectionBehavior: .never) var note: String?
+    @Parameter(title: "备注", inputOptions: String.IntentInputOptions(multiline: true), inputConnectionBehavior: .never) var note: String?
     @Parameter(title: "不计预算（是／否）", inputConnectionBehavior: .never) var excluded: String?
     @Parameter(title: "原始文本", inputConnectionBehavior: .never) var originalText: String?
     @Parameter(title: "支付截屏", inputConnectionBehavior: .never) var screenshot: IntentFile?
+    @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
     static var parameterSummary: some ParameterSummary {
-        Summary("准备账单") {
+        Summary("接收并确认账单") {
             \.$amount; \.$type; \.$ledger; \.$category; \.$tag; \.$account
             \.$sourceAccount; \.$destinationAccount; \.$date; \.$note
             \.$excluded; \.$originalText; \.$screenshot
         }
     }
-    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<VariableBillingDraft> {
-        .result(value: try await VariableBillingFlow.prepare(amount: amount, type: type, ledgerId: ledger?.id,
-            category: category, tag: tag, accountId: account?.id, sourceAccountId: sourceAccount?.id,
-            destinationAccountId: destinationAccount?.id, date: date, note: note, excluded: excluded,
-            originalText: originalText, screenshot: screenshot))
+    @MainActor func perform() async throws -> some IntentResult & ReturnsValue<ConfirmedVariableBilling> {
+        ConfirmedBilling.inputTrace("variable.receive.started")
+        do {
+            let draft = try await VariableBillingFlow.prepare(amount: amount, type: type, ledgerId: ledger?.id,
+                category: category, tag: tag, accountId: account?.id, sourceAccountId: sourceAccount?.id,
+                destinationAccountId: destinationAccount?.id, date: date, note: note, excluded: excluded,
+                originalText: originalText, screenshot: screenshot)
+            let result = try await VariableBillingFlow.confirm(draft, choose: { values, prompt in
+                choice = nil
+                ConfirmedBilling.inputTrace("variable.menu.requested")
+                let selected = try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
+                ConfirmedBilling.inputTrace("variable.menu.returned")
+                return selected
+            }, readAmount: { current, _ in
+                // Use the very parameter the Shortcut supplied, not a separate hidden input slot.
+                // Text preserves exact decimal precision; keyboard prefill remains system-defined.
+                amount = current == "待填写" ? nil : current
+                return try await VariableBillingPrompt.request(.amount) {
+                    try await $amount.requestValue("修改金额：请输入十进制金额")
+                }
+            }, readNote: { current in
+                note = current
+                return try await VariableBillingPrompt.request(.note) {
+                    try await $note.requestValue("修改备注：可留空；取消保留原备注")
+                }
+            }, readDate: { current in
+                date = current
+                return try await $date.requestValue("修改账单时间")
+            })
+            ConfirmedBilling.inputTrace("variable.receive.finished")
+            return .result(value: result)
+        } catch let failure as VariableBillingPrompt.Failure {
+            ConfirmedBilling.inputTrace("variable.receive.host_error")
+            throw failure.underlying
+        } catch {
+            ConfirmedBilling.inputTrace("variable.receive.error code=" + String((error as NSError).code))
+            throw error
+        }
+    }
+}
+
+/// Only the first action's explicit confirmation creates a savable result.
+/// A cancellation has no submission or screenshot and makes the save action a no-op.
+@available(iOS 16.0, *)
+struct ConfirmedVariableBilling: TransientAppEntity {
+    static var typeDisplayRepresentation: TypeDisplayRepresentation = "账单确认结果"
+    @Property(title: "确认状态") var status: String
+    @Property(title: "确认内容") var payload: String
+    @Property(title: "支付截屏") var screenshot: IntentFile?
+    var displayRepresentation: DisplayRepresentation {
+        DisplayRepresentation(title: "账单确认结果")
+    }
+    init() {}
+    init(status: String, payload: String, screenshot: IntentFile?) {
+        self.status = status; self.payload = payload; self.screenshot = screenshot
     }
 }
 
 @available(iOS 16.0, *)
 struct ConfirmVariableBillingIntent: AppIntent {
     static var isDiscoverable = true
-    static var title: LocalizedStringResource = "确认并记账"
-    static var description: LocalizedStringResource = "查看并逐项修改待确认账单；标签点击轮换，确认后按最终值保存一条。取消不入账，不调用 AI。"
+    static var title: LocalizedStringResource = "保存账单"
+    static var description: LocalizedStringResource = "只接收上一动作已确认的最终账单并保存，不再显示编辑菜单。未确认或取消不保存，不调用 AI。"
     static var openAppWhenRun = false
-    @Parameter(title: "待确认账单") var bill: VariableBillingDraft
-    // These are prompt slots owned by this intent, not extra user-built actions.
-    @Parameter(title: "菜单", inputConnectionBehavior: .never) var choice: String?
-    @Parameter(title: "修改金额", inputConnectionBehavior: .never) var editingAmount: Double?
-    @Parameter(title: "修改备注", inputOptions: String.IntentInputOptions(multiline: true), inputConnectionBehavior: .never) var editingNote: String?
-    @Parameter(title: "修改时间", inputConnectionBehavior: .never) var editingDate: Date?
-    static var parameterSummary: some ParameterSummary { Summary("确认并记账 \(\.$bill)") }
+    @Parameter(title: "账单确认结果") var bill: ConfirmedVariableBilling
+    static var parameterSummary: some ParameterSummary { Summary("保存账单 \(\.$bill)") }
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
-        ConfirmedBilling.inputTrace("variable.perform.started")
-        do {
-            let outcome = try await VariableBillingFlow.review(bill, choose: { values, prompt in
-                // Match the earlier prompt probe: each menu request owns a fresh slot.
-                choice = nil
-                ConfirmedBilling.inputTrace("variable.menu.requested")
-                let selected = try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
-                ConfirmedBilling.inputTrace("variable.menu.returned")
-                return selected
-            }, readAmount: { current, digits in
-                // Retain the numeric current value rather than forcibly unsetting the slot.
-                // This restores the tested call shape, not a promise of keyboard prefill.
-                editingAmount = Double(current)
-                let value: Double = try await VariableBillingPrompt.request(.amount) {
-                    try await $editingAmount.requestValue("修改金额：请输入新金额")
-                }
-                // Validation is separate from the host request so invalid numbers can
-                // return to the draft without treating a framework error as bill data.
-                return try VariableBillingFlow.amountText(value, digits: digits)
-            }, readNote: { current in
-                editingNote = current
-                return try await VariableBillingPrompt.request(.note) {
-                    try await $editingNote.requestValue("修改备注：可留空；取消保留原备注")
-                }
-            }, readDate: { current in
-                editingDate = current
-                return try await $editingDate.requestValue("修改账单时间")
-            })
-            ConfirmedBilling.inputTrace("variable.perform.finished")
-            return .result(value: outcome.value, dialog: IntentDialog(stringLiteral: outcome.message))
-        } catch let failure as VariableBillingPrompt.Failure {
-            // Hand the original error back to Shortcuts, not another menu request.
-            // Do not turn parameter resolution failures into a business retry/commit.
-            ConfirmedBilling.inputTrace("variable.perform.host_error")
-            throw failure.underlying
-        } catch {
-            ConfirmedBilling.inputTrace("variable.perform.error code=" + String((error as NSError).code))
-            throw error
-        }
+        let outcome = try await VariableBillingFlow.save(bill)
+        return .result(value: outcome.value, dialog: IntentDialog(stringLiteral: outcome.message))
     }
 }
 
 // Keep input-host errors distinct from invalid amounts/notes. The generic seam
-// exercises the exact path used by the live intent for Double and String requests.
+// exercises the live request path; receiver amount and note now use their own String parameters.
 @available(iOS 16.0, *)
 @MainActor
 enum VariableBillingPrompt {
@@ -1437,13 +1446,12 @@ enum VariableBillingFlow {
         return VariableBillingDraft(payload: try ConfirmedBilling.encode(payload), screenshot: screenshot)
     }
 
-    static func review(_ bill: VariableBillingDraft,
+    static func confirm(_ bill: VariableBillingDraft,
                        choose: ([String], String) async throws -> String,
                        readAmount: (String, Int) async throws -> String,
                        readNote: (String) async throws -> String,
                        readDate: (Date?) async throws -> Date,
-                       call: ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call,
-                       commit: ([String: Any], IntentFile?) async throws -> String = { try await ConfirmedBilling.commit($0, attachment: $1) }) async throws -> Outcome {
+                       call: ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call) async throws -> ConfirmedVariableBilling {
         var state = try ConfirmedBilling.decode(bill.payload)
         guard state["variableBillingVersion"] as? Int == 1,
               let requestID = state["requestId"] as? String, UUID(uuidString: requestID) != nil,
@@ -1452,7 +1460,7 @@ enum VariableBillingFlow {
               state["note"] is String, (state["note"] as? String ?? "").utf8.count <= 10000,
               state["tagIds"] is [Int], (state["tagIds"] as? [Int] ?? []).count <= 1,
               state["excludeFromBudget"] is Bool else {
-            throw ShortcutBillingError(message: "请把准备账单的待确认账单连接到此动作，不要只传文字属性")
+            throw ShortcutBillingError(message: "当前接收的账单草稿格式无效，未生成确认结果")
         }
         var options = try await call(["operation": "options", "ledgerId": initialLedger, "type": initialType])
         func rows(_ key: String) -> [[String: Any]] { options[key] as? [[String: Any]] ?? [] }
@@ -1492,8 +1500,8 @@ enum VariableBillingFlow {
                 catch is CancellationError { continue }
             }
         }
-        func cancelled() throws -> Outcome {
-            Outcome(value: try ConfirmedBilling.encode(["status": "cancelled"]), message: "已取消，未入账")
+        func cancelled() -> ConfirmedVariableBilling {
+            ConfirmedVariableBilling(status: "cancelled", payload: "", screenshot: nil)
         }
         func revalidateReferences() {
             if !has(state["accountId"] as? Int, in: "accounts") { state.removeValue(forKey: "accountId") }
@@ -1507,7 +1515,7 @@ enum VariableBillingFlow {
         }
         revalidateReferences()
         while true {
-            if Task.isCancelled { return try cancelled() }
+            if Task.isCancelled { return cancelled() }
             let type = state["type"] as? String ?? "expense"
             guard let ledgerId = options["ledgerId"] as? Int, let currency = options["currency"] as? String,
                   let digits = options["minorDigits"] as? Int, (0...4).contains(digits) else { throw ShortcutBillingError(message: "账本选项无效，未入账") }
@@ -1535,11 +1543,11 @@ enum VariableBillingFlow {
             let labels = fields.map { $0 + "：" + (values[$0] ?? "") }
             let selected: String
             do { selected = try await choose(labels + ["确认提交", "取消提交"], "确认账单（修改后返回此菜单）") }
-            catch is CancellationError { return try cancelled() }
+            catch is CancellationError { return cancelled() }
             let action = labels.firstIndex(of: selected).map { fields[$0] } ?? selected
             do {
                 switch action {
-                case "取消提交": return try cancelled()
+                case "取消提交": return cancelled()
                 case "金额":
                     let text = try await readAmount(amountLabel, digits)
                     state["amountMinor"] = try ConfirmedBilling.minor(text, digits: digits)
@@ -1619,39 +1627,90 @@ enum VariableBillingFlow {
                     if type == "transfer" { submission["toAccountId"] = state["toAccountId"] }
                     _ = try await call(["operation": "validate", "submission": submission])
                     try Task.checkCancellation()
-                    // Encode attachment once at confirmation; retries retain this exact payload and request ID.
-                    if let screenshot = bill.screenshot { submission["attachment"] = try ConfirmedBilling.attachmentPayload(screenshot) }
-                    while true {
-                        do {
-                            try Task.checkCancellation()
-                            let saved = try await commit(submission, nil)
-                            let response = try ConfirmedBilling.decode(saved)
-                            guard response["status"] as? String == "committed" else { throw ShortcutBillingError(message: "尚未收到已入账凭证") }
-                            return Outcome(value: saved, message: "已在本机入账 1 条，合计 " + ConfirmedBilling.money(finalAmount, digits: digits) + " " + currency + "。云端同步请查看 App，无需重记。")
-                        } catch {
-                            let next: String
-                            do { next = try await choose(["查询并重试原账单", "结束并稍后核对"], "提交结果未完成或不明；不要重新运行准备账单。" + error.localizedDescription) }
-                            catch { return Outcome(value: try ConfirmedBilling.encode(["status": "unknown", "requestId": requestID]), message: "结果未确认，请查看 App 最近提交凭证及账单，不要重复记账") }
-                            if next != "查询并重试原账单" { return Outcome(value: try ConfirmedBilling.encode(["status": "unknown", "requestId": requestID]), message: "结果未确认，请查看 App 最近提交凭证及账单，不要重复记账") }
-                            // Query is diagnostic only: a receipt for this ID alone cannot prove
-                            // it corresponds to these final edited values. Recommit the identical
-                            // payload so the store verifies its canonical digest before success.
-                            _ = try? await call(["operation": "query", "requestId": requestID])
-                        }
-                    }
+                    var envelope: [String: Any] = ["variableConfirmationVersion": 1, "submission": submission, "minorDigits": digits]
+                    if bill.screenshot != nil { envelope["attachmentKeepOriginal"] = UserDefaults.standard.bool(forKey: "flutter.attachmentKeepOriginal") }
+                    let result = try ConfirmedBilling.encode(envelope)
+                    return ConfirmedVariableBilling(status: "confirmed", payload: result, screenshot: bill.screenshot)
                 default: throw ShortcutBillingError(message: "菜单选项已失效，请重新选择")
                 }
             } catch let failure as VariableBillingPrompt.Failure {
                 // A host prompt failure must unwind to perform(), not be consumed by
-                // the bill-validation error menu below. No submission exists yet.
+                // the bill-validation error menu below. No save is attempted here.
                 throw failure
             } catch is CancellationError { continue }
             catch {
                 do { _ = try await choose(["返回账单"], error.localizedDescription) }
-                catch is CancellationError { return try cancelled() }
+                catch is CancellationError { return cancelled() }
             }
         }
     }
+
+    /// Non-interactive second action. It has no input/menu callbacks and cannot
+    /// manufacture a confirmation from an unconfirmed draft.
+    static func save(_ result: ConfirmedVariableBilling,
+                     call: ([String: Any]) async throws -> [String: Any] = ConfirmedBilling.call,
+                     commit: ([String: Any], IntentFile?) async throws -> String = { try await ConfirmedBilling.commit($0, attachment: $1) }) async throws -> Outcome {
+        if result.status == "cancelled" {
+            guard result.payload.isEmpty, result.screenshot == nil else { throw ShortcutBillingError(message: "取消结果格式无效，未入账") }
+            return Outcome(value: try ConfirmedBilling.encode(["status": "cancelled"]), message: "已取消，未入账")
+        }
+        guard result.status == "confirmed" else { throw ShortcutBillingError(message: "没有收到已确认账单，未入账") }
+        let envelope = try ConfirmedBilling.decode(result.payload)
+        guard envelope["variableConfirmationVersion"] as? Int == 1,
+              var submission = envelope["submission"] as? [String: Any],
+              submission["schemaVersion"] as? Int == 1, submission["confirmed"] as? Bool == true,
+              let requestID = submission["requestId"] as? String, UUID(uuidString: requestID) != nil,
+              let ledgerID = submission["ledgerId"] as? Int, let currency = submission["currency"] as? String,
+              let digits = envelope["minorDigits"] as? Int, (0...4).contains(digits),
+              let type = submission["type"] as? String, ["expense", "income", "transfer"].contains(type),
+              let entries = submission["entries"] as? [[String: Any]], entries.count == 1,
+              submission["split"] == nil, submission["attachment"] == nil else {
+            throw ShortcutBillingError(message: "请连接接收并确认账单输出的整份确认结果，未确认草稿不可保存")
+        }
+        try Task.checkCancellation()
+        let current = try await call(["operation": "options", "ledgerId": ledgerID, "type": type])
+        guard current["currency"] as? String == currency, current["minorDigits"] as? Int == digits else {
+            throw ShortcutBillingError(message: "确认后账本币种或精度已变化，未保存；请重新核对原账单")
+        }
+        // Freeze the original-image preference at confirmation. Retrying this same
+        // result must not generate a different payload when the App setting changes.
+        if let screenshot = result.screenshot {
+            guard let keepOriginal = envelope["attachmentKeepOriginal"] as? Bool else {
+                throw ShortcutBillingError(message: "已确认截图缺少保存设置，未入账")
+            }
+            submission["attachment"] = try ConfirmedBilling.attachmentPayload(screenshot, keepOriginal: keepOriginal)
+        }
+        _ = try await call(["operation": "validate", "submission": submission])
+        try Task.checkCancellation()
+        // Keep exactly this submission (request ID, attachment and final values) on
+        // recovery. Never open an editor or invoke the variable receiver from here.
+        var saved: String
+        do { saved = try await commit(submission, nil) }
+        catch {
+            if error is CancellationError { throw error }
+            // Query alone cannot prove the saved payload matches these edited values.
+            // Re-submit the same payload only when the query says a receipt exists;
+            // the store checks its canonical digest before returning existing success.
+            let found = try? await call(["operation": "query", "requestId": requestID])
+            guard found?["status"] as? String == "committed" else {
+                throw ShortcutBillingError(message: "保存结果未确认。请求 ID：" + requestID + "。请在 App 核对账单和提交凭证；重试只重跑本保存动作并沿用同一确认结果，不要重跑接收并确认账单。")
+            }
+            do {
+                try Task.checkCancellation()
+                saved = try await commit(submission, nil)
+            } catch {
+                if error is CancellationError { throw error }
+                throw ShortcutBillingError(message: "无法核实此确认内容是否已保存。请求 ID：" + requestID + "。请在 App 核对；不要更换内容或重新生成请求重记。")
+            }
+        }
+        let response = try ConfirmedBilling.decode(saved)
+        guard response["status"] as? String == "committed", let receiptID = response["requestId"] as? String,
+              receiptID.caseInsensitiveCompare(requestID) == .orderedSame else {
+            throw ShortcutBillingError(message: "尚未收到对应账单的保存凭证。请求 ID：" + requestID + "。请先在 App 核对，不要重复记账。")
+        }
+        return Outcome(value: saved, message: "已在本机保存 1 条账单。云端同步请查看 App，无需重记。")
+    }
+
 }
 
 #endif
