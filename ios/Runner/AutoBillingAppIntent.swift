@@ -1471,8 +1471,13 @@ enum VariableBillingFlow {
                 "时间": (state["occurredAt"] as? String).map(ConfirmedBilling.displayTime) ?? "待填写",
                 "备注": state["note"] as? String ?? "",
                 "不计预算": (state["pendingBudget"] as? String).map { "待选择（" + $0 + "）" } ?? (state["excludeFromBudget"] as? Bool == true ? "是" : "否")]
-            let fields = ["金额", "类型", "账本"] + (type == "transfer" ? [] : ["分类"]) + ["标签"] +
-                (type == "transfer" ? ["转出账户", "转入账户"] : ["账户"]) + ["时间", "备注"] + (type == "expense" ? ["不计预算"] : [])
+            var fields: [String] = ["金额", "类型", "账本"]
+            if type != "transfer" { fields.append("分类") }
+            fields.append("标签")
+            if type == "transfer" { fields.append(contentsOf: ["转出账户", "转入账户"]) }
+            else { fields.append("账户") }
+            fields.append(contentsOf: ["时间", "备注"])
+            if type == "expense" { fields.append("不计预算") }
             let labels = fields.map { $0 + "：" + (values[$0] ?? "") }
             let selected: String
             do { selected = try await choose(labels + ["确认提交", "取消提交"], "确认账单（修改后返回此菜单）") }
