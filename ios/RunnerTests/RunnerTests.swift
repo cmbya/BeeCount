@@ -1653,4 +1653,145 @@ class RunnerTests: XCTestCase {
     XCTAssertTrue(choices.isEmpty)
   }
 
+
+  // This seam is called by the live intent around requestValue. These are host-error
+  // routing tests, not evidence that a Shortcuts input sheet appeared on a device.
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariablePromptReturnsNumericAndEmptyTextWithoutLoggingValues() async throws {
+    var events: [String] = []
+    let amount: Double = try await VariableBillingPrompt.request(.amount, trace: { events.append($0) }) { 127.89 }
+    let note: String = try await VariableBillingPrompt.request(.note, trace: { events.append($0) }) { "private real bill note" }
+    let empty: String = try await VariableBillingPrompt.request(.note, trace: { events.append($0) }) { "" }
+    XCTAssertEqual(amount, 127.89)
+    XCTAssertEqual(note, "private real bill note")
+    XCTAssertEqual(empty, "")
+    XCTAssertEqual(events, ["variable.amount.requested", "variable.amount.returned",
+        "variable.note.requested", "variable.note.returned", "variable.note.requested", "variable.note.returned"])
+    XCTAssertFalse(events.joined().contains("127.89"))
+    XCTAssertFalse(events.joined().contains("private"))
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariablePromptCancellationRemainsCancellationWithoutSyntheticValue() async throws {
+    for field in [VariableBillingPrompt.Field.amount, .note] {
+      var events: [String] = []
+      do {
+        let _: String = try await VariableBillingPrompt.request(field, trace: { events.append($0) }) { throw CancellationError() }
+        XCTFail("Cancellation must not turn into an empty note or numeric zero")
+      } catch { XCTAssertTrue(error is CancellationError) }
+      XCTAssertEqual(events, ["variable." + field.rawValue + ".requested", "variable." + field.rawValue + ".cancelled"])
+    }
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariablePromptHostErrorRetainsOriginalWithoutLoggingDescription() async throws {
+    let original = NSError(domain: "InputHost", code: 42, userInfo: [NSLocalizedDescriptionKey: "private note and amount 127.89"])
+    var events: [String] = []
+    do {
+      let _: String = try await VariableBillingPrompt.request(.note, trace: { events.append($0) }) { throw original }
+      XCTFail("Failed input must not fabricate bill text")
+    } catch let failure as VariableBillingPrompt.Failure {
+      XCTAssertEqual((failure.underlying as NSError).domain, "InputHost")
+      XCTAssertEqual((failure.underlying as NSError).code, 42)
+    }
+    XCTAssertEqual(events, ["variable.note.requested", "variable.note.host_error code=42"])
+    XCTAssertFalse(events.joined().contains("private"))
+    XCTAssertFalse(events.joined().contains("127.89"))
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariablePromptFrameworkErrorIsNotConsumedByBillValidationMenu() async throws {
+    let intent = ConfirmVariableBillingIntent()
+    let original = intent.$editingNote.needsValueError("private current note")
+    let bill = try await variableBill()
+    var events: [String] = []
+    var menus = 0
+    var validations = 0
+    var commits = 0
+    do {
+      _ = try await VariableBillingFlow.review(bill, choose: { values, _ in
+        menus += 1
+        XCTAssertEqual(menus, 1, "Host errors must not trigger another bill-error menu")
+        return self.menuValue("备注", values)
+      }, readAmount: { _, _ in XCTFail(); return "" }, readNote: { _ in
+        try await VariableBillingPrompt.request(.note, trace: { events.append($0) }) { throw original }
+      }, readDate: { _ in XCTFail(); return Date() }, call: { request in
+        if request["operation"] as? String == "validate" { validations += 1 }
+        return self.variableOptions()
+      }, commit: { _, _ in commits += 1; return "" })
+      XCTFail("Framework error must unwind to perform for Shortcuts to handle")
+    } catch let failure as VariableBillingPrompt.Failure {
+      XCTAssertTrue(failure.underlying is AppIntentError)
+    }
+    XCTAssertEqual(menus, 1)
+    XCTAssertEqual(validations, 0)
+    XCTAssertEqual(commits, 0)
+    XCTAssertTrue(events.last?.hasPrefix("variable.note.framework code=") == true)
+    XCTAssertFalse(events.joined().contains("private"))
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableNumericHostErrorCannotReachSubmitOrBusinessRetry() async throws {
+    let bill = try await variableBill()
+    let original = NSError(domain: "NumericHost", code: 17)
+    var menus = 0
+    do {
+      _ = try await VariableBillingFlow.review(bill, choose: { values, _ in
+        menus += 1
+        XCTAssertEqual(menus, 1)
+        return self.menuValue("金额", values)
+      }, readAmount: { _, _ in
+        let value: Double = try await VariableBillingPrompt.request(.amount, trace: { _ in }) { throw original }
+        return try VariableBillingFlow.amountText(value, digits: 2)
+      }, readNote: { _ in XCTFail(); return "" }, readDate: { _ in XCTFail(); return Date() }, call: { request in
+        XCTAssertEqual(request["operation"] as? String, "options")
+        return self.variableOptions()
+      }, commit: { _, _ in XCTFail("No input, no commit"); return "" })
+      XCTFail("Host failure cannot be turned into success")
+    } catch let failure as VariableBillingPrompt.Failure {
+      XCTAssertEqual((failure.underlying as NSError).domain, "NumericHost")
+      XCTAssertEqual((failure.underlying as NSError).code, 17)
+    }
+    XCTAssertEqual(menus, 1)
+  }
+
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariablePromptValuesStillValidateAndReturnToSameDraft() async throws {
+    let bill = try await variableBill()
+    var choices = ["金额", "返回账单", "金额", "备注", "金额", "备注", "确认提交"]
+    var amounts: [Double] = [1.001, 12.34, 23.45]
+    var notes = ["第一次备注", "最后实际备注"]
+    var events: [String] = []
+    var commits = 0
+    _ = try await VariableBillingFlow.review(bill, choose: { values, _ in
+      let desired = choices.removeFirst()
+      let selected = self.menuValue(desired, values)
+      XCTAssertTrue(values.contains(selected), selected)
+      return selected
+    }, readAmount: { _, digits in
+      let number: Double = try await VariableBillingPrompt.request(.amount, trace: { events.append($0) }) { amounts.removeFirst() }
+      return try VariableBillingFlow.amountText(number, digits: digits)
+    }, readNote: { current in
+      XCTAssertEqual(current, notes.count == 2 ? "原备注" : "第一次备注")
+      return try await VariableBillingPrompt.request(.note, trace: { events.append($0) }) { notes.removeFirst() }
+    }, readDate: { _ in XCTFail(); return Date() }, call: { request in
+      request["operation"] as? String == "validate" ? ["status": "valid"] : self.variableOptions()
+    }, commit: { submission, _ in
+      commits += 1
+      XCTAssertTrue(choices.isEmpty)
+      let entry = try XCTUnwrap((submission["entries"] as? [[String: Any]])?.first)
+      XCTAssertEqual(entry["amountMinor"] as? Int, 2345)
+      XCTAssertEqual(entry["note"] as? String, "最后实际备注")
+      return try ConfirmedBilling.encode(["status": "committed"])
+    })
+    XCTAssertEqual(commits, 1)
+    XCTAssertEqual(events.count, 10)
+    XCTAssertTrue(amounts.isEmpty)
+    XCTAssertTrue(notes.isEmpty)
+    XCTAssertFalse(events.joined().contains("备注"))
+  }
+
 }

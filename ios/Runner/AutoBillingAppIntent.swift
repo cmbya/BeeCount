@@ -1264,21 +1264,75 @@ struct ConfirmVariableBillingIntent: AppIntent {
     @Parameter(title: "修改时间", inputConnectionBehavior: .never) var editingDate: Date?
     static var parameterSummary: some ParameterSummary { Summary("确认并记账 \(\.$bill)") }
     @MainActor func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
-        let outcome = try await VariableBillingFlow.review(bill, choose: { values, prompt in
-            try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
-        }, readAmount: { current, digits in
-            editingAmount = nil
-            // Deliberately no dynamic prefill promise. Current value is visible in the dialog/menu.
-            let value = try await $editingAmount.requestValue(IntentDialog(stringLiteral: "请输入新金额；当前：" + current))
-            return try VariableBillingFlow.amountText(value, digits: digits)
-        }, readNote: { current in
-            editingNote = current
-            return try await $editingNote.requestValue(IntentDialog(stringLiteral: "修改备注（可留空）；当前备注：" + current))
-        }, readDate: { current in
-            editingDate = current
-            return try await $editingDate.requestValue("修改账单时间")
-        })
-        return .result(value: outcome.value, dialog: IntentDialog(stringLiteral: outcome.message))
+        ConfirmedBilling.inputTrace("variable.perform.started")
+        do {
+            let outcome = try await VariableBillingFlow.review(bill, choose: { values, prompt in
+                // Match the earlier prompt probe: each menu request owns a fresh slot.
+                choice = nil
+                ConfirmedBilling.inputTrace("variable.menu.requested")
+                let selected = try await $choice.requestDisambiguation(among: values, dialog: IntentDialog(stringLiteral: prompt))
+                ConfirmedBilling.inputTrace("variable.menu.returned")
+                return selected
+            }, readAmount: { current, digits in
+                // Retain the numeric current value rather than forcibly unsetting the slot.
+                // This restores the tested call shape, not a promise of keyboard prefill.
+                editingAmount = Double(current)
+                let value: Double = try await VariableBillingPrompt.request(.amount) {
+                    try await $editingAmount.requestValue("修改金额：请输入新金额")
+                }
+                // Validation is separate from the host request so invalid numbers can
+                // return to the draft without treating a framework error as bill data.
+                return try VariableBillingFlow.amountText(value, digits: digits)
+            }, readNote: { current in
+                editingNote = current
+                return try await VariableBillingPrompt.request(.note) {
+                    try await $editingNote.requestValue("修改备注：可留空；取消保留原备注")
+                }
+            }, readDate: { current in
+                editingDate = current
+                return try await $editingDate.requestValue("修改账单时间")
+            })
+            ConfirmedBilling.inputTrace("variable.perform.finished")
+            return .result(value: outcome.value, dialog: IntentDialog(stringLiteral: outcome.message))
+        } catch let failure as VariableBillingPrompt.Failure {
+            // Hand the original error back to Shortcuts, not another menu request.
+            // Do not turn parameter resolution failures into a business retry/commit.
+            ConfirmedBilling.inputTrace("variable.perform.host_error")
+            throw failure.underlying
+        } catch {
+            ConfirmedBilling.inputTrace("variable.perform.error code=" + String((error as NSError).code))
+            throw error
+        }
+    }
+}
+
+// Keep input-host errors distinct from invalid amounts/notes. The generic seam
+// exercises the exact path used by the live intent for Double and String requests.
+@available(iOS 16.0, *)
+@MainActor
+enum VariableBillingPrompt {
+    enum Field: String { case amount, note }
+    struct Failure: Error { let underlying: Error }
+    static func request<Value>(_ field: Field,
+                               trace: ((String) -> Void)? = nil,
+                               read: () async throws -> Value) async throws -> Value {
+        let emit = trace ?? { ConfirmedBilling.inputTrace($0) }
+        let prefix = "variable." + field.rawValue
+        emit(prefix + ".requested")
+        do {
+            let value = try await read()
+            emit(prefix + ".returned")
+            return value
+        } catch is CancellationError {
+            emit(prefix + ".cancelled")
+            // A cancelled field is not an empty/zero response and never commits.
+            throw CancellationError()
+        } catch {
+            let kind = error is AppIntentError ? "framework" : "host_error"
+            emit(prefix + "." + kind + " code=" + String((error as NSError).code))
+            // Never log prompts, amounts, notes, NSError descriptions or userInfo.
+            throw Failure(underlying: error)
+        }
     }
 }
 
@@ -1587,6 +1641,10 @@ enum VariableBillingFlow {
                     }
                 default: throw ShortcutBillingError(message: "菜单选项已失效，请重新选择")
                 }
+            } catch let failure as VariableBillingPrompt.Failure {
+                // A host prompt failure must unwind to perform(), not be consumed by
+                // the bill-validation error menu below. No submission exists yet.
+                throw failure
             } catch is CancellationError { continue }
             catch {
                 do { _ = try await choose(["返回账单"], error.localizedDescription) }
