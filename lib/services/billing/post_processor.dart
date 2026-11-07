@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../providers.dart';
+import '../../providers/budget_providers.dart';
 import '../../cloud/sync/sync_engine.dart';
 import '../attachment_service.dart';
 import '../system/logger_service.dart';
@@ -21,6 +22,7 @@ class PostProcessor {
     bool attachments = false,
   }) async {
     ref.read(statsRefreshProvider.notifier).state++;
+    ref.read(budgetRefreshProvider.notifier).state++;
     if (tags) ref.read(tagListRefreshProvider.notifier).state++;
     if (attachments) ref.read(attachmentListRefreshProvider.notifier).state++;
     await _doSync(ref, ledgerId);
@@ -34,6 +36,7 @@ class PostProcessor {
     bool attachments = false,
   }) async {
     c.read(statsRefreshProvider.notifier).state++;
+    c.read(budgetRefreshProvider.notifier).state++;
     if (tags) c.read(tagListRefreshProvider.notifier).state++;
     if (attachments) c.read(attachmentListRefreshProvider.notifier).state++;
     await _doSyncC(c, ledgerId);
@@ -47,6 +50,7 @@ class PostProcessor {
     bool attachments = false,
   }) async {
     ref.read(statsRefreshProvider.notifier).state++;
+    ref.read(budgetRefreshProvider.notifier).state++;
     if (tags) ref.read(tagListRefreshProvider.notifier).state++;
     if (attachments) ref.read(attachmentListRefreshProvider.notifier).state++;
     await _doSyncR(ref, ledgerId);
@@ -72,6 +76,7 @@ class PostProcessor {
   /// UI 层使用（WidgetRef）
   static void runAfterDownload(WidgetRef ref) {
     ref.read(statsRefreshProvider.notifier).state++;
+    ref.read(budgetRefreshProvider.notifier).state++;
     ref.read(syncStatusRefreshProvider.notifier).state++;
     ref.read(ledgerListRefreshProvider.notifier).state++;
     ref.read(tagListRefreshProvider.notifier).state++;
@@ -83,6 +88,7 @@ class PostProcessor {
   /// 后台服务使用（ProviderContainer）
   static void runAfterDownloadC(ProviderContainer c) {
     c.read(statsRefreshProvider.notifier).state++;
+    c.read(budgetRefreshProvider.notifier).state++;
     c.read(syncStatusRefreshProvider.notifier).state++;
     c.read(ledgerListRefreshProvider.notifier).state++;
     c.read(tagListRefreshProvider.notifier).state++;

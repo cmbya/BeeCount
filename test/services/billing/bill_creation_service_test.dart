@@ -14,6 +14,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:beecount/ai/core/bill_info.dart';
+import 'package:beecount/cloud/sync/change_tracker.dart';
+import 'package:beecount/services/system/logger_service.dart';
 import 'package:beecount/data/db.dart';
 import 'package:beecount/data/repositories/local/local_repository.dart';
 import 'package:beecount/services/billing/bill_creation_service.dart';
@@ -36,6 +38,53 @@ void main() {
 
   tearDown(() async {
     await db.close();
+  });
+
+  test('tag failure rolls back the bill, new tags and sync outbox', () async {
+    repo = LocalRepository(db, changeTracker: ChangeTracker(db));
+    service = BillCreationService(repo);
+    await db.customStatement("""
+      CREATE TRIGGER reject_tag BEFORE INSERT ON transaction_tags
+      BEGIN SELECT RAISE(ABORT, 'injected tag failure'); END
+    """);
+    await expectLater(service.createFromBill(
+      bill: BillInfo(amount: 12, time: DateTime(2026, 11, 8), tags: ['private-tag']),
+      ledgerId: ledgerId,
+    ), throwsA(isA<Exception>()));
+    expect(await db.select(db.transactions).get(), isEmpty);
+    expect(await db.select(db.tags).get(), isEmpty);
+    expect(await db.select(db.localChanges).get(), isEmpty);
+    await db.customStatement('DROP TRIGGER reject_tag');
+    final id = await service.createFromBill(
+      bill: BillInfo(amount: 12, time: DateTime(2026, 11, 8), tags: ['private-tag']),
+      ledgerId: ledgerId,
+    );
+    expect(id, isNotNull);
+    expect(await db.select(db.transactions).get(), hasLength(1));
+    expect(await db.select(db.transactionTags).get(), hasLength(1));
+  });
+
+  test('bill logs do not contain amount, names, note, time or tag content', () async {
+    SharedPreferences.setMockInitialValues({'account_feature_enabled': true});
+    await repo.createCategory(name: 'sensitive-category', kind: 'expense');
+    await repo.createAccount(ledgerId: ledgerId, name: 'sensitive-account');
+    final before = logger.logs.length;
+    await service.createFromBill(
+      bill: BillInfo(amount: 91827.43, time: DateTime(2026, 11, 8, 13, 45),
+        category: 'sensitive-category', account: 'sensitive-account',
+        note: 'sensitive-note', tags: ['sensitive-tag']),
+      ledgerId: ledgerId,
+    );
+    await service.createFromBill(
+      bill: BillInfo(amount: 0, note: 'invalid-sensitive-note'), ledgerId: ledgerId,
+    );
+    final logs = logger.logs.skip(before).where((e) => e.tag == 'BillCreation')
+        .map((e) => e.toFormattedString()).join();
+    expect(logs, contains('成功'));
+    for (final secret in ['91827.43', 'sensitive-category', 'sensitive-account',
+      'sensitive-note', 'sensitive-tag', 'invalid-sensitive-note', '2026-11-08 13:45']) {
+      expect(logs, isNot(contains(secret)));
+    }
   });
 
   // ============================================================

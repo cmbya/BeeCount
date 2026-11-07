@@ -361,7 +361,7 @@ class LocalRepository extends BaseRepository {
     bool excludeFromBudget = false,
     String? currencyCode,
     double? nativeAmount,
-  }) async {
+  }) => db.transaction(() async {
     // v30 带折算兜底(02 §六):任何调用方(单币种记账/AI/周期模板)未传两字段
     // 时在此补齐 —— 外币先查有效汇率,取不到才 =amount(命中 L11 检测可捞回)。
     final (cc, na) = await _resolveTxCurrency(
@@ -402,7 +402,7 @@ class LocalRepository extends BaseRepository {
       }
     }
     return id;
-  }
+  });
 
   @override
   Future<int> insertTransactionsBatch(
@@ -462,7 +462,7 @@ class LocalRepository extends BaseRepository {
     bool? excludeFromBudget,
     String? currencyCode,
     double? nativeAmount,
-  }) async {
+  }) => db.transaction(() async {
     final old = await _transactionRepo.getTransactionById(id);
     // v30 联动兜底(与 Cloud merge/mutator 的 L14 同规则):调用方不传两字段时——
     //   a) 账户变了(如转账换账户对,transfer_form 不传币种)→ 币种应跟随新
@@ -538,10 +538,10 @@ class LocalRepository extends BaseRepository {
       currencyCode: effCurrency,
       nativeAmount: effNative,
     );
-  }
+  });
 
   @override
-  Future<void> deleteTransaction(int id) async {
+  Future<void> deleteTransaction(int id) => db.transaction(() async {
     if (changeTracker != null) {
       final tx = await _transactionRepo.getTransactionById(id);
       if (tx?.syncId != null) {
@@ -555,7 +555,7 @@ class LocalRepository extends BaseRepository {
       }
     }
     await _transactionRepo.deleteTransaction(id);
-  }
+  });
 
   @override
   Future<Transaction?> getTransactionById(int id) =>

@@ -4,6 +4,7 @@ import 'package:collection/collection.dart';
 import '../../ai/core/bill_info.dart';
 import '../../data/db.dart';
 import '../../data/repositories/base_repository.dart';
+import '../../data/repositories/local/local_repository.dart';
 import '../../data/category_node.dart';
 import '../../l10n/app_localizations.dart';
 import '../data/tag_seed_service.dart';
@@ -46,14 +47,14 @@ class BillCreationService {
   }) async {
     final amount = bill.amount;
     if (amount == null || amount.abs() <= 0) {
-      logger.warning(_tag, '[校验] amount 无效,跳过: ${bill.toJson()}');
+      logger.warning(_tag, '[校验] amount 无效,跳过');
       return null;
     }
 
     // 1. 确定交易类型
     final transactionType = _resolveType(bill);
     logger.debug(_tag,
-        '[类型判断] type=${bill.type?.name} amount=$amount → $transactionType');
+        '[类型判断] $transactionType');
 
     // 2. 查询对应类型的所有可用分类
     final categories = await _loadUsableCategories(transactionType);
@@ -132,26 +133,23 @@ class BillCreationService {
       await _ensureRateAvailable(txCurrency);
     }
 
-    // 5. 落库。nativeAmount 不传 —— 交给 LocalRepository._resolveTxCurrency
-    //    按有效汇率折算;缺汇率时它会退化成 =amount 并被 L11 检测捞回。
+    // Read preferences before committing: a settings failure must not leave a
+    // transaction that the caller mistakes for a failed save.
+    final autoTagsEnabled = autoAddTags &&
+        ((await SharedPreferences.getInstance()).getBool('smartBillingAutoTags') ?? true);
     final happenedAt = bill.time ?? DateTime.now();
-    final transactionId = await repo.addTransaction(
-      ledgerId: ledgerId,
-      type: transactionType,
-      amount: amount.abs(),
-      categoryId: categoryId,
-      accountId: accountId,
-      toAccountId: toAccountId,
-      happenedAt: happenedAt,
-      note: bill.note,
-      currencyCode: txCurrency,
-    );
-
-    // 6. 自动标签:受「智能记账自动关联标签」开关控制(默认开启,关闭后不挂任何标签)。
-    //    与账户功能开关一致直接读 prefs;入参 autoAddTags 作为代码级强制开关,二者取「与」。
-    if (autoAddTags) {
-      final prefs = await SharedPreferences.getInstance();
-      final autoTagsEnabled = prefs.getBool('smartBillingAutoTags') ?? true;
+    Future<int> persist() async {
+      final transactionId = await repo.addTransaction(
+        ledgerId: ledgerId,
+        type: transactionType,
+        amount: amount.abs(),
+        categoryId: categoryId,
+        accountId: accountId,
+        toAccountId: toAccountId,
+        happenedAt: happenedAt,
+        note: bill.note,
+        currencyCode: txCurrency,
+      );
       if (autoTagsEnabled) {
         await _addTags(
           transactionId,
@@ -160,31 +158,15 @@ class BillCreationService {
           l10n: l10n,
         );
       }
+      return transactionId;
     }
 
-    // 7. 汇总日志
-    String? categoryName;
-    String? accountName;
-    if (categoryId != null) {
-      categoryName = categories.firstWhereOrNull((c) => c.id == categoryId)?.name;
-    }
-    if (accountId != null) {
-      accountName = (await repo.getAccount(accountId))?.name;
-    }
-    final typeStr = transactionType == 'income'
-        ? '收入'
-        : (transactionType == 'transfer' ? '转账' : '支出');
-    final tagSources = <String>[
-      ...?billingTypes,
-      ...?(customTagNames ?? bill.tags),
-    ];
-    logger.info(
-      _tag,
-      '[自动记账] 成功 | ID:$transactionId | ${amount.abs()}元 | $typeStr | '
-      '分类:${categoryName ?? '未设置'} | 账户:${accountName ?? '未设置'} | '
-      '时间:${_formatDateTime(happenedAt)} | 备注:${bill.note ?? '无'} | '
-      '标签:${tagSources.isNotEmpty ? tagSources.join(',') : '无'}',
-    );
+    // Keep the bill, tags and sync outbox atomic on the local database.
+    final local = repo;
+    final transactionId = local is LocalRepository
+        ? await local.db.transaction(persist)
+        : await persist();
+    logger.info(_tag, '[自动记账] 成功');
 
     return transactionId;
   }
@@ -242,7 +224,7 @@ class BillCreationService {
           categories.firstWhereOrNull((c) => c.name == aiCategoryName);
       if (exact != null) {
         logger.debug(_tag,
-            '[分类匹配-完全] AI 分类"$aiCategoryName" → ${exact.name}(ID:${exact.id})');
+            '[分类匹配-完全] 已匹配');
         return exact.id;
       }
 
@@ -263,10 +245,10 @@ class BillCreationService {
       }
       if (best != null) {
         logger.debug(_tag,
-            '[分类匹配-模糊] AI 分类"$aiCategoryName" → ${best.name}(ID:${best.id})');
+            '[分类匹配-模糊] 已匹配');
         return best.id;
       }
-      logger.debug(_tag, '[分类匹配] AI 分类"$aiCategoryName" 未匹配,降级规则匹配');
+      logger.debug(_tag, '[分类匹配] 未匹配,降级规则匹配');
     }
 
     return CategoryMatcher.smartMatch(
@@ -285,12 +267,12 @@ class BillCreationService {
         (c) => c.name.toLowerCase().contains(k.toLowerCase()),
       );
       if (hit != null) {
-        logger.debug(_tag, '[分类兜底] 使用"${hit.name}"(ID:${hit.id})');
+        logger.debug(_tag, '[分类兜底] 使用默认分类');
         return hit.id;
       }
     }
     final last = categories.last;
-    logger.debug(_tag, '[分类兜底] 使用"${last.name}"(ID:${last.id})');
+    logger.debug(_tag, '[分类兜底] 使用最后一个分类');
     return last.id;
   }
 
@@ -318,7 +300,7 @@ class BillCreationService {
     final matched = await _matchAccountByName(aiAccountName, requestedCurrency);
     if (matched != null) return matched;
 
-    logger.debug(_tag, '[账户匹配] "$aiAccountName" 未匹配,尝试默认账户');
+    logger.debug(_tag, '[账户匹配] 未匹配,尝试默认账户');
     return _getDefaultAccountId(
         transactionType, prefs, requestedCurrency ?? ledgerBase);
   }
@@ -344,7 +326,7 @@ class BillCreationService {
     for (final a in pool) {
       if (a.name.toLowerCase().trim() == target) {
         logger.debug(_tag,
-            '[账户匹配-完全] "$accountName" → ${a.name}(ID:${a.id})');
+            '[账户匹配-完全] 已匹配');
         return a.id;
       }
     }
@@ -353,7 +335,7 @@ class BillCreationService {
       final n = a.name.toLowerCase().trim();
       if (n.contains(target) || target.contains(n)) {
         logger.debug(_tag,
-            '[账户匹配-模糊] "$accountName" → ${a.name}(ID:${a.id})');
+            '[账户匹配-模糊] 已匹配');
         return a.id;
       }
     }
@@ -372,7 +354,7 @@ class BillCreationService {
       for (final r in related) {
         if (n.contains(r.toLowerCase())) {
           logger.debug(_tag,
-              '[账户匹配-类型] "$accountName" → ${a.name}(ID:${a.id})');
+              '[账户匹配-类型] 已匹配');
           return a.id;
         }
       }
@@ -402,7 +384,7 @@ class BillCreationService {
           '[默认账户] 币种不匹配: ${account.currency} vs $txCurrency');
       return null;
     }
-    logger.debug(_tag, '[默认账户] → ${account.name}(ID:${account.id})');
+    logger.debug(_tag, '[默认账户] 已匹配');
     return defaultId;
   }
 
@@ -459,40 +441,32 @@ class BillCreationService {
     List<String>? customTagNames,
     AppLocalizations? l10n,
   }) async {
-    try {
-      final names = <String>{};
-      if (billingTypes != null && billingTypes.isNotEmpty && l10n != null) {
-        names.addAll(TagSeedService.getBillingTagNames(billingTypes, l10n));
-      }
-      if (customTagNames != null && customTagNames.isNotEmpty) {
-        names.addAll(customTagNames
-            .map((n) => n.trim())
-            .where((n) => n.isNotEmpty));
-      }
-      if (names.isEmpty) return;
+    final names = <String>{};
+    if (billingTypes != null && billingTypes.isNotEmpty && l10n != null) {
+      names.addAll(TagSeedService.getBillingTagNames(billingTypes, l10n));
+    }
+    if (customTagNames != null && customTagNames.isNotEmpty) {
+      names.addAll(customTagNames
+          .map((n) => n.trim())
+          .where((n) => n.isNotEmpty));
+    }
+    if (names.isEmpty) return;
 
-      final tagIds = <int>[];
-      for (final name in names) {
-        var tag = await repo.getTagByName(name);
-        if (tag == null) {
-          final color = TagSeedService.getRandomColor();
-          final id = await repo.createTag(name: name, color: color);
-          tagIds.add(id);
-        } else {
-          tagIds.add(tag.id);
-        }
+    final tagIds = <int>[];
+    for (final name in names) {
+      var tag = await repo.getTagByName(name);
+      if (tag == null) {
+        final color = TagSeedService.getRandomColor();
+        final id = await repo.createTag(name: name, color: color);
+        tagIds.add(id);
+      } else {
+        tagIds.add(tag.id);
       }
-      if (tagIds.isNotEmpty) {
-        await repo.addTagsToTransaction(
-            transactionId: transactionId, tagIds: tagIds);
-      }
-    } catch (e, st) {
-      logger.error(_tag, '[标签] 添加失败', e, st);
+    }
+    if (tagIds.isNotEmpty) {
+      await repo.addTagsToTransaction(
+          transactionId: transactionId, tagIds: tagIds);
     }
   }
 
-  String _formatDateTime(DateTime dt) {
-    String pad(int n) => n.toString().padLeft(2, '0');
-    return '${dt.year}-${pad(dt.month)}-${pad(dt.day)} ${pad(dt.hour)}:${pad(dt.minute)}';
-  }
 }

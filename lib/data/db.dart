@@ -512,11 +512,11 @@ class BeeDatabase extends _$BeeDatabase {
   BeeDatabase.forTesting(QueryExecutor executor) : super(executor);
 
   @override
-  int get schemaVersion => 35; // v35: 已确认逐笔拆分进度（不保存草稿）
+  int get schemaVersion => 36; // v36: 统一新建/升级索引并修复旧库缺失索引
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
-        onUpgrade: (migrator, from, to) async {
+        onUpgrade: (migrator, from, to) => transaction(() async {
           if (from < 2) {
             // 添加 sortOrder 字段（使用原始 SQL，因为此时代码还未生成）
             await customStatement(
@@ -1184,7 +1184,9 @@ class BeeDatabase extends _$BeeDatabase {
           if (from < 27) {
             logger.info('DBMigration', '开始迁移到 v27: ledgers.month_start_day');
             // v27: 账本自定义每月起始日(1-28),默认 1=自然月
-            await customStatement(
+            await _addColumnIfMissing(
+                'ledgers',
+                'month_start_day',
                 'ALTER TABLE ledgers ADD COLUMN month_start_day INTEGER NOT NULL DEFAULT 1;');
             logger.info('DBMigration', 'v27 迁移完成');
           }
@@ -1265,17 +1267,42 @@ class BeeDatabase extends _$BeeDatabase {
           if (from < 35) {
             for (final sql in shortcutProgressiveTablesSql) { await customStatement(sql); }
           }
-        },
+          // v36 also repairs databases created by older onCreate paths.
+          await _ensureIndexes();
+          // Commit schema and its version together, even if the process exits
+          // before Drift finishes its post-migration open bookkeeping.
+          await customStatement('PRAGMA user_version = $to');
+        }),
         onCreate: (m) async {
           await m.createAll();
           for (final sql in shortcutTablesSql) { await customStatement(sql); }
           for (final sql in shortcutProgressiveTablesSql) { await customStatement(sql); }
-          await customStatement(
-              'CREATE UNIQUE INDEX IF NOT EXISTS idx_rate_override_pair '
-              'ON exchange_rate_overrides (base_currency, quote_currency);');
+          await _ensureIndexes();
           await _createAgentMemoryFtsTable();
         },
       );
+
+  /// Shared by fresh installs and upgrades; keep schema paths consistent.
+  Future<void> _ensureIndexes() async {
+    const statements = <String>[
+      'CREATE INDEX IF NOT EXISTS idx_transaction_tags_transaction ON transaction_tags(transaction_id)',
+      'CREATE INDEX IF NOT EXISTS idx_transaction_tags_tag ON transaction_tags(tag_id)',
+      'CREATE INDEX IF NOT EXISTS idx_budgets_ledger ON budgets(ledger_id)',
+      'CREATE INDEX IF NOT EXISTS idx_budgets_category ON budgets(category_id)',
+      'CREATE INDEX IF NOT EXISTS idx_budgets_ledger_type ON budgets(ledger_id, type)',
+      'CREATE INDEX IF NOT EXISTS idx_attachments_transaction ON transaction_attachments(transaction_id)',
+      'CREATE INDEX IF NOT EXISTS idx_transactions_sync_id ON transactions(sync_id)',
+      'CREATE INDEX IF NOT EXISTS idx_accounts_sync_id ON accounts(sync_id)',
+      'CREATE INDEX IF NOT EXISTS idx_categories_sync_id ON categories(sync_id)',
+      'CREATE INDEX IF NOT EXISTS idx_tags_sync_id ON tags(sync_id)',
+      'CREATE INDEX IF NOT EXISTS idx_ledgers_sync_id ON ledgers(sync_id)',
+      'CREATE INDEX IF NOT EXISTS idx_budgets_sync_id ON budgets(sync_id)',
+      'CREATE UNIQUE INDEX IF NOT EXISTS idx_rate_override_pair ON exchange_rate_overrides (base_currency, quote_currency)',
+    ];
+    for (final sql in statements) {
+      await customStatement(sql);
+    }
+  }
 
   Future<void> _createAgentMemoryFtsTable() => customStatement(
         'CREATE VIRTUAL TABLE IF NOT EXISTS agent_memory_fts '
@@ -1285,9 +1312,8 @@ class BeeDatabase extends _$BeeDatabase {
   /// Migration helper: 列不存在再 ALTER ADD,避免 partial state 重跑时
   /// "duplicate column" 把启动卡死。
   ///
-  /// SQLite DDL 隐式 commit 且不可回滚;上次 onUpgrade 跑到一半失败时,前面
-  /// 已成功的 ALTER 已写入文件但 user_version 没更新,下次启动同一段重跑就
-  /// 报 duplicate。每条 ALTER 都通过这里走 PRAGMA 检查可幂等。
+  /// SQLite DDL 可以在事务中回滚。旧版本未使用迁移事务时可能遗留已添加
+  /// 的列且 user_version 未更新；这里也允许这些部分完成的迁移安全重试。
   Future<void> _addColumnIfMissing(
       String table, String column, String ddl) async {
     final cols = await customSelect("PRAGMA table_info($table)").get();

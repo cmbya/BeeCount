@@ -305,7 +305,7 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
         onSubmit: (res) async {
           final repo = ref.read(repositoryProvider);
           final attachmentService = ref.read(attachmentServiceProvider);
-          int transactionId;
+          final attachmentWarning = AppLocalizations.of(context).transactionAttachmentsPartial;
           // §7 v25:Category 是来自 SharedLedger* 的 synthetic (id<0)时,
           // categoryId 留 null,override 走 syncId。同理对 account/toAccount。
           // res.accountId 可能也是 synthetic(Account picker 用同一规则)。
@@ -323,6 +323,8 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
           final categoryOverride = isSyntheticCategory ? c.syncId : null;
           final accountOverride =
               isSyntheticAccount ? await _resolveSyncIdByAccountId(res.accountId!, ledgerId) : null;
+          Future<int> persist() async {
+            int transactionId;
           if (widget.editingTransactionId != null) {
             // 编辑模式：使用repository更新交易
             await repo.updateTransaction(
@@ -341,9 +343,7 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
               nativeAmount: res.nativeAmount,
             );
             transactionId = widget.editingTransactionId!;
-            // 共享账本:本地 lastEditedByUserId 立即回填,UI 头像组直接展示
-            // 当前 user 为编辑人(否则要等 server 下次 pull 才回来)
-            await TxAuthorService.markEdited(ref, transactionId);
+
           } else {
             transactionId = await repo.addTransaction(
               ledgerId: ledgerId,
@@ -360,18 +360,7 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
               currencyCode: res.currencyCode,
               nativeAmount: res.nativeAmount,
             );
-            // 共享账本:新建本地 tx 也回填创建人 + 编辑人(同一个 user)
-            await TxAuthorService.markCreated(ref, transactionId);
-          }
-          // 保存待上传的附件
-          if (res.pendingAttachments.isNotEmpty) {
-            await attachmentService.saveAttachments(
-              transactionId: transactionId,
-              sourceFiles: res.pendingAttachments,
-              startIndex: 0,
-            );
-            // 刷新附件列表缓存
-            ref.read(attachmentListRefreshProvider.notifier).state++;
+
           }
           // 更新标签关联
           // §7 共享账本:tag.id < 0 是 synthetic(Owner tag from SharedLedger*),
@@ -386,11 +375,9 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
               transactionId: transactionId,
               tagIds: normalTagIds,
             );
-            ref.read(tagListRefreshProvider.notifier).state++;
           } else if (widget.editingTransactionId != null) {
             // 编辑模式没主表 tag → 清掉旧主表关联
             await repo.removeAllTagsFromTransaction(transactionId);
-            ref.read(tagListRefreshProvider.notifier).state++;
           }
 
           // §7 写 override:先反查 tx.syncId + 把 synthetic tag_id 翻译成
@@ -424,8 +411,7 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
                     }
                   }
                 }
-                ref.read(tagListRefreshProvider.notifier).state++;
-              }
+                  }
               // 这里**不再**重复 recordLedgerChange(transaction:update)。
               // 之前为了"override 变化也走 push"专门补一条 update,但
               // - addTransaction / updateTransaction 已经登记过一次 change
@@ -437,6 +423,34 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
               // 创建 tx 时 1 秒内 2 条 identical upsert)。直接砍。
             }
           }
+            return transactionId;
+          }
+          final transactionId = repo is LocalRepository
+              ? await repo.db.transaction(persist)
+              : await persist();
+          if (widget.editingTransactionId != null) {
+            await TxAuthorService.markEdited(ref, transactionId);
+          } else {
+            await TxAuthorService.markCreated(ref, transactionId);
+          }
+          var attachmentFailed = false;
+          if (res.pendingAttachments.isNotEmpty) {
+            try {
+              final saved = await attachmentService.saveAttachmentsWithResult(
+                transactionId: transactionId,
+                sourceFiles: res.pendingAttachments,
+              );
+              attachmentFailed = saved.failedCount > 0;
+            } catch (_) {
+              // The bill is already committed; never report it as unsaved.
+              attachmentFailed = true;
+            }
+            ref.read(attachmentListRefreshProvider.notifier).state++;
+          }
+          ref.read(tagListRefreshProvider.notifier).state++;
+          final saveWarning = attachmentFailed
+              ? attachmentWarning
+              : null;
           // 统一处理：自动/手动同步与状态刷新（后台静默）
           PostProcessor.sync(ref, ledgerId: ledgerId);
           // 刷新：账本笔数与全局统计
@@ -448,6 +462,9 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
           if (context.mounted) {
             updateAppWidget(ref, context);
           }
+          if (saveWarning != null && context.mounted) {
+            showToast(context, saveWarning, duration: const Duration(seconds: 5));
+          }
           // 双击完成：只收起金额面板，保留分类选择页供下一笔使用。
           // 普通完成：按原流程关闭金额面板和分类选择页。
           if (ctx.mounted && Navigator.of(ctx).canPop()) Navigator.of(ctx).pop();
@@ -456,7 +473,7 @@ class _TransactionEditorPageState extends ConsumerState<TransactionEditorPage>
               Navigator.of(context).canPop()) {
             Navigator.of(context).pop();
           }
-          if (res.continueAdding && context.mounted) {
+          if (res.continueAdding && !attachmentFailed && context.mounted) {
             showToast(
               context,
               AppLocalizations.of(context).transactionSavedNextCategory,

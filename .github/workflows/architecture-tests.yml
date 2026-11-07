@@ -1,0 +1,54 @@
+name: Architecture Regression Tests
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.27.3'
+          channel: stable
+          cache: true
+      - name: Get dependencies
+        run: flutter pub get
+      - name: Format validation and analysis evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          dart format --output=none lib/data/db.dart lib/data/repositories/local/local_repository.dart lib/services/billing lib/services/ai/ai_bookkeeper.dart lib/services/attachment_service.dart lib/pages/transaction/transaction_editor_page.dart lib/widgets/biz/amount_editor_sheet.dart test/data/migration_v36_test.dart test/data/repositories/local_repository_atomic_write_test.dart test/services/billing/post_processor_budget_test.dart test/services/billing/bill_creation_service_test.dart test/services/attachment_service_test.dart test/widgets/amount_editor_submit_test.dart test/widgets/transaction_editor_atomic_test.dart
+          # Existing warnings are recorded; actual analyzer errors fail the job.
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings 2>&1 | tee test-results/analysis.log
+      - name: Run targeted data, billing, widget and shortcut regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter test --no-pub --reporter expanded \
+            test/data/migration_v30_test.dart \
+            test/data/migration_v36_test.dart \
+            test/data/repositories/local_repository_atomic_write_test.dart \
+            test/data/repositories/local_repository_bulk_sync_test.dart \
+            test/data/repositories/local/local_transaction_repository_test.dart \
+            test/services/billing/ \
+            test/services/attachment_service_test.dart \
+            test/widgets/amount_editor_currency_test.dart \
+            test/widgets/amount_editor_submit_test.dart \
+            test/widgets/transaction_editor_atomic_test.dart \
+            test/services/shortcut*_test.dart \
+            2>&1 | tee test-results/regression.log
+      - name: Upload verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: architecture-regression-results
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 14

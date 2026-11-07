@@ -144,7 +144,7 @@ class AiBookkeeper {
         );
         if (txId == null) {
           failed++;
-          logger.warning(_tag, '第 ${i + 1} 笔创建失败: ${bill.toJson()}');
+          logger.warning(_tag, '第 ${i + 1} 笔创建失败');
           continue;
         }
 

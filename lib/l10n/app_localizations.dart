@@ -14474,6 +14474,9 @@ abstract class AppLocalizations {
   /// **'Saved. Choose another category.'**
   String get transactionSavedNextCategory;
 
+  /// Bill committed, but one or more images failed; retry images only.
+  String get transactionAttachmentsPartial;
+
   /// No description provided for @txConvertedPreview.
   ///
   /// In en, this message translates to:

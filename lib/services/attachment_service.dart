@@ -12,6 +12,21 @@ import '../data/db.dart';
 import '../providers.dart';
 import 'system/logger_service.dart';
 
+/// Reports partial attachment saves without asking the caller to retry a bill.
+class AttachmentSaveResult {
+  final List<TransactionAttachment> saved;
+  final List<int> failedIndexes;
+
+  AttachmentSaveResult({
+    required List<TransactionAttachment> saved,
+    required List<int> failedIndexes,
+  })  : saved = List.unmodifiable(saved),
+        failedIndexes = List.unmodifiable(failedIndexes);
+
+  int get failedCount => failedIndexes.length;
+  bool get isComplete => failedIndexes.isEmpty;
+}
+
 /// 附件服务
 /// 负责图片的选择、压缩、存储和管理
 class AttachmentService {
@@ -178,24 +193,39 @@ class AttachmentService {
     }
   }
 
-  /// 批量保存附件
+  /// Compatibility wrapper; callers needing feedback should use the result API.
   Future<List<TransactionAttachment>> saveAttachments({
     required int transactionId,
     required List<File> sourceFiles,
     int startIndex = 0,
+  }) async => (await saveAttachmentsWithResult(
+        transactionId: transactionId,
+        sourceFiles: sourceFiles,
+        startIndex: startIndex,
+      )).saved.toList();
+
+  /// Keeps successes and identifies failures. The transaction has already been
+  /// saved, so an attachment failure must not trigger a retry of the bill itself.
+  Future<AttachmentSaveResult> saveAttachmentsWithResult({
+    required int transactionId,
+    required List<File> sourceFiles,
+    int startIndex = 0,
   }) async {
-    final results = <TransactionAttachment>[];
-    for (int i = 0; i < sourceFiles.length; i++) {
+    final saved = <TransactionAttachment>[];
+    final failedIndexes = <int>[];
+    for (var i = 0; i < sourceFiles.length; i++) {
       final attachment = await saveAttachment(
         transactionId: transactionId,
         sourceFile: sourceFiles[i],
         index: startIndex + i,
       );
-      if (attachment != null) {
-        results.add(attachment);
+      if (attachment == null) {
+        failedIndexes.add(startIndex + i);
+      } else {
+        saved.add(attachment);
       }
     }
-    return results;
+    return AttachmentSaveResult(saved: saved, failedIndexes: failedIndexes);
   }
 
   /// 删除附件

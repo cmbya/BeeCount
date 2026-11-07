@@ -153,6 +153,29 @@ void main() {
         .setEnabled(enabled);
   }
 
+  test('batch result identifies partial saves without losing successes', () async {
+    await keepOriginal(true);
+    final service = container.read(attachmentServiceProvider);
+    final result = await service.saveAttachmentsWithResult(
+      transactionId: transactionId,
+      sourceFiles: [source, File('${directory.path}/missing.png'), source],
+      startIndex: 2,
+    );
+    expect(result.saved, hasLength(2));
+    expect(result.failedIndexes, [3]);
+    expect(result.failedCount, 1);
+    expect(result.isComplete, isFalse);
+    expect(await db.select(db.transactions).get(), hasLength(1));
+    expect(await db.select(db.transactionAttachments).get(), hasLength(2));
+  });
+
+  test('empty batch result is complete', () async {
+    final result = await container.read(attachmentServiceProvider)
+        .saveAttachmentsWithResult(transactionId: transactionId, sourceFiles: []);
+    expect(result.isComplete, isTrue);
+    expect(result.failedCount, 0);
+  });
+
   test('default compression is retained for gallery, camera and saved files',
       () async {
     final service = container.read(attachmentServiceProvider);

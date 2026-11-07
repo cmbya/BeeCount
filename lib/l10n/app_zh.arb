@@ -3278,6 +3278,7 @@
   "txCurrencyLabel": "币种",
   "txRateLabel": "汇率",
   "transactionDoubleTapHint": "双击再记",
+  "transactionAttachmentsPartial": "账单已保存，但部分附件保存失败。请在账单详情中补添附件，不要重复记账。",
   "transactionSavedNextCategory": "已保存，请选下一笔分类",
   "txConvertedPreview": "≈ {amount} {currency}",
   "@txConvertedPreview": { "placeholders": { "amount": {}, "currency": {} } },

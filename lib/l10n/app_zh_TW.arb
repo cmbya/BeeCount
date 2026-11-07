@@ -3221,6 +3221,7 @@
   "transactionCopyAction": "複製為新交易",
   "transactionCopyUnavailable": "無法複製這筆交易，請檢查帳本和存取權限。",
   "transactionDoubleTapHint": "雙擊再記",
+  "transactionAttachmentsPartial": "帳單已儲存，但部分附件儲存失敗。請在帳單詳情中補加附件，不要重複記帳。",
   "transactionSavedNextCategory": "已儲存，請選下一筆分類",
   "voiceMicPermissionRestricted": "裝置管理原則限制了麥克風權限",
   "customIconCompressFailed": "圖片壓縮失敗",

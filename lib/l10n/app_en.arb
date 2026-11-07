@@ -3354,6 +3354,7 @@
   "txCurrencyLabel": "Currency",
   "txRateLabel": "Rate",
   "transactionDoubleTapHint": "Double tap",
+  "transactionAttachmentsPartial": "Bill saved, but some attachments could not be saved. Open bill details to add them again; do not submit the bill again.",
   "transactionSavedNextCategory": "Saved. Choose another category.",
   "txConvertedPreview": "≈ {amount} {currency}",
   "@txConvertedPreview": { "placeholders": { "amount": {}, "currency": {} } },
