@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../support/widget_waits.dart';
 
 void main() {
   late BeeDatabase db;
@@ -31,6 +32,7 @@ void main() {
       home: Scaffold(body: TransactionList(hideAmounts: false, transactions: rows)))));
     await tester.runAsync(() async => Future<void>.delayed(const Duration(milliseconds: 150)));
     await tester.pumpAndSettle();
+    await pumpUntilFound(tester, find.byType(Dismissible).first);
   }
   Future<void> dispose(WidgetTester tester) async {
     await tester.pumpWidget(const SizedBox.shrink());

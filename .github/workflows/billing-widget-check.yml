@@ -1,0 +1,39 @@
+name: Billing Widget Check
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  widgets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.27.3'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: Run relevant widgets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          flutter test --no-pub --reporter expanded --concurrency 2 \
+            test/widgets/transaction_detail_page_test.dart \
+            test/widgets/transaction_detail_images_test.dart \
+            test/widgets/transaction_edit_scope_test.dart \
+            test/widgets/transaction_list_guards_test.dart \
+            test/widgets/analytics_dashboard_test.dart \
+            test/widgets/refund_page_test.dart \
+            test/widgets/home_monthly_summary_test.dart \
+            test/widgets/amount_editor_currency_test.dart \
+            test/widgets/amount_editor_submit_test.dart \
+            test/widgets/transaction_editor_atomic_test.dart \
+            test/widget/net_worth_view_test.dart 2>&1 | tee test-results/widgets.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: billing-widget-check-results
+          path: test-results/

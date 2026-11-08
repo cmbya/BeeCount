@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../support/widget_waits.dart';
 
 void main() {
   testWidgets('summary expense and daily average both navigate to scoped expense details', (tester) async {
@@ -41,7 +42,8 @@ void main() {
       expect(page.metric, metric); expect(page.query, query);
       expect(find.byKey(const Key('analytics-detail-range')), findsOneWidget);
       expect(data.detail(metric).single.t.id, id);
-      await tester.pageBack(); await tester.pumpAndSettle();
+      Navigator.of(tester.element(find.byType(AnalyticsDetailPage))).pop();
+      await tester.pumpAndSettle();
     }
     container.read(hideAmountsProvider.notifier).state = true;
     await tester.pump();
@@ -76,6 +78,7 @@ void main() {
     final page = tester.widget<AnalyticsDetailPage>(find.byType(AnalyticsDetailPage));
     expect(page.categoryIds, isNull);
     expect(page.categoryFilter!.id, root); expect(page.categoryFilter!.includeDescendants, true);
+    await pumpUntilFound(tester, find.byKey(ValueKey('tx-$id')));
     expect(find.byKey(ValueKey('tx-$id')), findsOneWidget);
     await tester.runAsync(() async {
       final added = await repo.createCategory(name: '网络', kind: 'expense', level: 2, parentId: root);
@@ -85,6 +88,7 @@ void main() {
     container.read(statsRefreshProvider.notifier).state++;
     await tester.runAsync(() async => Future<void>.delayed(const Duration(milliseconds: 150)));
     await tester.pumpAndSettle();
+    await pumpUntilFound(tester, find.byKey(ValueKey('tx-$id')));
     expect(find.byKey(ValueKey('tx-$id')), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink()); await tester.pump(const Duration(seconds: 3));
   });

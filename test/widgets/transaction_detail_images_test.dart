@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../support/widget_waits.dart';
 
 class _FakeImages extends AttachmentService {
   final int successCount;
@@ -45,7 +46,8 @@ void main() {
         supportedLocales: AppLocalizations.supportedLocales, home: TransactionDetailPage(transactionId: id))));
       await tester.runAsync(() async { await Future<void>.delayed(const Duration(milliseconds: 150)); });
       await tester.pumpAndSettle();
-      await tester.ensureVisible(find.byKey(const Key('detail-images')));
+      await pumpUntilFound(tester, find.byKey(const Key('detail-category')));
+      await revealRow(tester, find.byKey(const Key('detail-images')));
       await tester.tap(find.byKey(const Key('detail-images')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('从相册选择'));
@@ -73,7 +75,8 @@ void main() {
       supportedLocales: AppLocalizations.supportedLocales, home: TransactionDetailPage(transactionId: id))));
     await tester.runAsync(() async => Future<void>.delayed(const Duration(milliseconds: 150)));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.byKey(const Key('detail-images')));
+    await pumpUntilFound(tester, find.byKey(const Key('detail-category')));
+      await revealRow(tester, find.byKey(const Key('detail-images')));
     expect(find.descendant(of: find.byKey(const Key('detail-images')), matching: find.text('1')), findsOneWidget);
     expect((await repo.getAttachmentsByTransaction(id)).single.originalName, 'payment-screenshot.png');
     await tester.pumpWidget(const SizedBox.shrink()); await tester.pump(const Duration(seconds: 3));

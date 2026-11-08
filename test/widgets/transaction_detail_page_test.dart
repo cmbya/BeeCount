@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../support/widget_waits.dart';
 
 void main() {
   testWidgets('saved row opens grouped details without amount keyboard; note is prefilled', (tester) async {
@@ -31,6 +32,7 @@ void main() {
       supportedLocales: AppLocalizations.supportedLocales,
       home: Scaffold(body: TransactionList(hideAmounts: false, transactions: [(t: tx, category: category, account: null, toAccount: null)])))));
     await tester.pumpAndSettle();
+    await pumpUntilFound(tester, find.byType(TransactionListItem));
     await tester.tap(find.byType(TransactionListItem));
     await tester.runAsync(() async { await Future<void>.delayed(const Duration(milliseconds: 150)); });
     await tester.pumpAndSettle();
@@ -38,7 +40,8 @@ void main() {
     expect(find.text('账单详情'), findsOneWidget);
     expect(find.byType(AmountEditorSheet), findsNothing);
     expect(find.byType(TextField), findsNothing);
-    await tester.ensureVisible(find.byKey(const Key('detail-note')));
+    await pumpUntilFound(tester, find.byKey(const Key('detail-category')));
+    await revealRow(tester, find.byKey(const Key('detail-note')));
     await tester.tap(find.byKey(const Key('detail-note')));
     await tester.pumpAndSettle();
     final field = tester.widget<TextField>(find.byKey(const Key('detail-field-input')));

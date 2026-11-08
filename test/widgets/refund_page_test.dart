@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../support/widget_waits.dart';
 
 void main() {
   testWidgets('detail opens default full refund; partial switch and cancel never write', (tester) async {
@@ -28,7 +29,8 @@ void main() {
       home: TransactionDetailPage(transactionId: original))));
     await tester.runAsync(() async { await Future<void>.delayed(const Duration(milliseconds: 150)); });
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.byKey(const Key('detail-refund')));
+    await pumpUntilFound(tester, find.byKey(const Key('detail-category')));
+    await revealRow(tester, find.byKey(const Key('detail-refund')));
     await tester.tap(find.byKey(const Key('detail-refund')));
     await tester.pumpAndSettle();
     await tester.runAsync(() async { await Future<void>.delayed(const Duration(milliseconds: 150)); });

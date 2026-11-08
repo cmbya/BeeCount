@@ -8,6 +8,7 @@ import 'package:beecount/providers.dart';
 import 'package:beecount/widgets/biz/amount_editor_sheet.dart';
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -15,6 +16,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   testWidgets('manual bill and tags roll back together before retry', (tester) async {
     SharedPreferences.setMockInitialValues({});
+    const channel = MethodChannel('home_widget');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
+      channel, (call) async => call.method == 'getInstalledWidgets' ? <dynamic>[] : null);
+    addTearDown(() => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(channel, null));
     final db = BeeDatabase.forTesting(NativeDatabase.memory());
     final repo = LocalRepository(db, changeTracker: ChangeTracker(db));
     final ledger = await repo.createLedger(name: 'manual');
@@ -65,5 +71,5 @@ void main() {
     await tester.pumpAndSettle();
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump(const Duration(seconds: 3));
-  });
+  }, timeout: const Timeout(Duration(minutes: 2)));
 }
