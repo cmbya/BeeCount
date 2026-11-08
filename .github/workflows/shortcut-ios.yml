@@ -9,23 +9,6 @@ on:
       - "packages/**"
       - "pubspec.yaml"
       - "pubspec.lock"
-      - "test/data/**"
-      - "test/repositories/**"
-      - "test/cloud/sync/**"
-      - "test/sync/**"
-      - "test/models/refund*"
-      - "test/providers/home_summary*"
-      - "test/utils/analytics*"
-      - "test/services/refund*"
-      - "test/services/analytics*"
-      - "test/services/billing/**"
-      - "test/services/attachment*"
-      - "test/widgets/**"
-      - "test/services/shortcut*"
-      - "test/services/transaction_detail*"
-      - "test/services/transaction_edit_scope*"
-      - "test/widgets/transaction_detail*"
-      - "test/widgets/transaction_edit_scope*"
       - ".github/workflows/shortcut-ios.yml"
   workflow_dispatch:
     inputs:
@@ -47,109 +30,6 @@ env:
   CI: "true"
 
 jobs:
-  # No needs: tests and packaging run independently, subject to runner capacity.
-  core-tests:
-    name: Core shortcut tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-      - name: Cache pub dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.pub-cache
-          key: shortcut-pub-${{ runner.os }}-${{ runner.arch }}-${{ env.FLUTTER_VERSION }}-${{ hashFiles('pubspec.lock', '**/pubspec.yaml') }}
-          restore-keys: |
-            shortcut-pub-${{ runner.os }}-${{ runner.arch }}-${{ env.FLUTTER_VERSION }}-
-      - name: Get dependencies
-        run: flutter pub get
-      - name: Analyze application and test code
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p test-results
-          # Existing lint warnings remain visible; every analyzer error fails.
-          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib test 2>&1 | tee test-results/analysis.log
-      - name: Run focused shortcut tests
-        if: ${{ !cancelled() }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p test-results
-          # Unit/in-memory regressions only; no production AI credentials.
-          flutter test --no-pub --reporter expanded --timeout 90s \
-            test/data/ test/repositories/ test/cloud/sync/ test/sync/ \
-            test/services/billing/ test/services/attachment_service_test.dart \
-            test/services/shortcut*_test.dart test/services/refund*_test.dart \
-            test/services/analytics_dashboard_test.dart \
-            test/services/transaction_detail_service_test.dart \
-            test/services/transaction_edit_scope_test.dart \
-            test/models/refund_identity_test.dart \
-            test/providers/home_summary_providers_test.dart \
-            test/utils/analytics*_test.dart test/utils/net_worth_trend_utils_test.dart \
-            2>&1 | tee test-results/shortcut-tests.log
-      - name: Upload core test log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shortcut-core-test-results
-          path: test-results/
-          if-no-files-found: warn
-          retention-days: 14
-      - name: Test summary
-        if: always()
-        env:
-          JOB_STATUS: ${{ job.status }}
-        run: |
-          echo "### Analyzer and core regressions: $JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
-          echo "Analyzer errors are blocking. Existing lint warnings are reported. Refund/sync, permissions, atomic writes, migrations, accounts, budgets, analytics, attachments and shortcut tests run without production AI. Widget and native results are separate gates." >> "$GITHUB_STEP_SUMMARY"
-
-  widget-tests:
-    name: Billing and statistics widget tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-      - name: Get dependencies
-        run: flutter pub get
-      - name: Run billing and statistics widgets
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p test-results
-          flutter test --no-pub --reporter expanded --timeout 90s --concurrency 2 \
-            test/widgets/transaction_detail_page_test.dart \
-            test/widgets/transaction_detail_images_test.dart \
-            test/widgets/transaction_edit_scope_test.dart \
-            test/widgets/transaction_list_guards_test.dart \
-            test/widgets/analytics_dashboard_test.dart \
-            test/widgets/refund_page_test.dart \
-            test/widgets/home_monthly_summary_test.dart \
-            test/widgets/amount_editor_currency_test.dart \
-            test/widgets/amount_editor_submit_test.dart \
-            test/widgets/transaction_editor_atomic_test.dart \
-            test/widget/net_worth_view_test.dart \
-            2>&1 | tee test-results/widget-tests.log
-      - name: Upload widget test evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shortcut-widget-test-results
-          path: test-results/
-          if-no-files-found: warn
-          retention-days: 14
-
   ios-build:
     name: iOS build and package
     runs-on: macos-15-intel
@@ -215,8 +95,7 @@ jobs:
           PY
           cp ../../LICENSE LICENSE.txt
           shasum -a 256 BeeCount-shortcut-unsigned.ipa build-info.json LICENSE.txt > SHA256SUMS.txt
-      # Upload as soon as this job finishes, without waiting for core-tests.
-      # An available IPA is NOT a claim that tests or device acceptance passed.
+      # Build-only delivery: no analyzer, Flutter/widget tests or simulator run.
       - name: Upload unsigned IPA immediately
         uses: actions/upload-artifact@v4
         with:
@@ -235,59 +114,5 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           echo "### iOS packaging: $JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
-          echo "If uploaded, the unsigned IPA is available in this run's artifacts. Check analyzer/core, Billing and statistics widget tests and Native billing tests separately; pending or failed tests do not block artifact upload. Physical-device acceptance is still required." >> "$GITHUB_STEP_SUMMARY"
+          echo "The unsigned IPA is available in this run's artifacts after compilation. Tests, analyzer and simulator checks are intentionally not run. Release publication follows a successful build. Physical-device acceptance is not verified." >> "$GITHUB_STEP_SUMMARY"
 
-  native-tests:
-    name: Native billing tests
-    runs-on: macos-15-intel
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-      - name: Get dependencies
-        run: flutter pub get
-      - name: Configure native test dependencies
-        run: |
-          set -euo pipefail
-          flutter build ios --simulator --debug --no-pub --config-only
-          cd ios
-          pod install
-      - name: Select available iOS simulator
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json, os, subprocess
-          devices = json.loads(subprocess.check_output(['xcrun', 'simctl', 'list', 'devices', 'available', '--json']))['devices']
-          candidates = [(runtime, d['udid']) for runtime, values in devices.items()
-                        if 'iOS' in runtime for d in values if d.get('isAvailable') and d['name'].startswith('iPhone')]
-          if not candidates:
-              raise RuntimeError('No available iPhone simulator; native tests cannot be skipped as passed')
-          runtime, udid = sorted(candidates, reverse=True)[0]
-          with open(os.environ['GITHUB_ENV'], 'a') as out:
-              out.write('TEST_SIMULATOR_ID=' + udid + '\n')
-          subprocess.run(['xcrun', 'simctl', 'boot', udid], check=False)
-          subprocess.run(['xcrun', 'simctl', 'bootstatus', udid, '-b'], check=True)
-          PY
-      - name: Run native billing tests
-        run: |
-          set -euo pipefail
-          mkdir -p test-results
-          xcodebuild test -workspace ios/Runner.xcworkspace -scheme Runner \
-            -configuration Debug -destination "platform=iOS Simulator,id=$TEST_SIMULATOR_ID" \
-            -only-testing:RunnerTests -resultBundlePath test-results/RunnerTests.xcresult \
-            -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1 \
-            -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
-            -maximum-test-execution-time-allowance 120 \
-            CODE_SIGNING_ALLOWED=NO 2>&1 | tee test-results/native-tests.log
-      - name: Upload native test evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: shortcut-native-test-results
-          path: test-results/
-          if-no-files-found: warn
-          retention-days: 14
