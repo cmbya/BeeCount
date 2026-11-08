@@ -9,6 +9,18 @@ on:
       - "packages/**"
       - "pubspec.yaml"
       - "pubspec.lock"
+      - "test/data/**"
+      - "test/repositories/**"
+      - "test/cloud/sync/**"
+      - "test/sync/**"
+      - "test/models/refund*"
+      - "test/providers/home_summary*"
+      - "test/utils/analytics*"
+      - "test/services/refund*"
+      - "test/services/analytics*"
+      - "test/services/billing/**"
+      - "test/services/attachment*"
+      - "test/widgets/**"
       - "test/services/shortcut*"
       - "test/services/transaction_detail*"
       - "test/services/transaction_edit_scope*"
@@ -16,6 +28,12 @@ on:
       - "test/widgets/transaction_edit_scope*"
       - ".github/workflows/shortcut-ios.yml"
   workflow_dispatch:
+    inputs:
+      build_number:
+        description: "CFBundleVersion (greater than the last published build)"
+        required: true
+        type: string
+        default: "25"
 
 permissions:
   contents: read
@@ -33,7 +51,7 @@ jobs:
   core-tests:
     name: Core shortcut tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Setup Flutter
@@ -51,28 +69,37 @@ jobs:
             shortcut-pub-${{ runner.os }}-${{ runner.arch }}-${{ env.FLUTTER_VERSION }}-
       - name: Get dependencies
         run: flutter pub get
-      - name: Run focused shortcut tests
+      - name: Analyze application and test code
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p test-results
-          # Existing files cover draft recognition, local HTTP transport,
-          # rules/settings, budget flags, atomic split commits and idempotency.
-          # No production AI credentials, device, full-suite or coverage run.
-          flutter test --no-pub --reporter expanded \
-            test/services/shortcut*_test.dart \
+          # Existing lint warnings remain visible; every analyzer error fails.
+          flutter analyze --no-pub --no-fatal-infos --no-fatal-warnings lib test 2>&1 | tee test-results/analysis.log
+      - name: Run focused shortcut tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          # Unit/in-memory regressions only; no production AI credentials.
+          flutter test --no-pub --reporter expanded --timeout 90s \
+            test/data/ test/repositories/ test/cloud/sync/ test/sync/ \
+            test/services/billing/ test/services/attachment_service_test.dart \
+            test/services/shortcut*_test.dart test/services/refund*_test.dart \
+            test/services/analytics_dashboard_test.dart \
             test/services/transaction_detail_service_test.dart \
             test/services/transaction_edit_scope_test.dart \
-            test/widgets/transaction_detail_page_test.dart \
-            test/widgets/transaction_detail_images_test.dart \
-            test/widgets/transaction_edit_scope_test.dart \
+            test/models/refund_identity_test.dart \
+            test/providers/home_summary_providers_test.dart \
+            test/utils/analytics*_test.dart test/utils/net_worth_trend_utils_test.dart \
             2>&1 | tee test-results/shortcut-tests.log
       - name: Upload core test log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: shortcut-core-test-results
-          path: test-results/shortcut-tests.log
+          path: test-results/
           if-no-files-found: warn
           retention-days: 14
       - name: Test summary
@@ -80,8 +107,48 @@ jobs:
         env:
           JOB_STATUS: ${{ job.status }}
         run: |
-          echo "### Core shortcut tests: $JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
-          echo "Focused Flutter service/widget tests only. No paid AI calls in this job. Native simulator results are reported separately. This does not verify physical-device menus." >> "$GITHUB_STEP_SUMMARY"
+          echo "### Analyzer and core regressions: $JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
+          echo "Analyzer errors are blocking. Existing lint warnings are reported. Refund/sync, permissions, atomic writes, migrations, accounts, budgets, analytics, attachments and shortcut tests run without production AI. Widget and native results are separate gates." >> "$GITHUB_STEP_SUMMARY"
+
+  widget-tests:
+    name: Billing and statistics widget tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Get dependencies
+        run: flutter pub get
+      - name: Run billing and statistics widgets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          flutter test --no-pub --reporter expanded --timeout 90s --concurrency 2 \
+            test/widgets/transaction_detail_page_test.dart \
+            test/widgets/transaction_detail_images_test.dart \
+            test/widgets/transaction_edit_scope_test.dart \
+            test/widgets/transaction_list_guards_test.dart \
+            test/widgets/analytics_dashboard_test.dart \
+            test/widgets/refund_page_test.dart \
+            test/widgets/home_monthly_summary_test.dart \
+            test/widgets/amount_editor_currency_test.dart \
+            test/widgets/amount_editor_submit_test.dart \
+            test/widgets/transaction_editor_atomic_test.dart \
+            test/widget/net_worth_view_test.dart \
+            2>&1 | tee test-results/widget-tests.log
+      - name: Upload widget test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shortcut-widget-test-results
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 14
 
   ios-build:
     name: iOS build and package
@@ -113,8 +180,20 @@ jobs:
             shortcut-pods-${{ runner.os }}-${{ runner.arch }}-
       - name: Get dependencies
         run: flutter pub get
+      - name: Set build identity
+        env:
+          REQUESTED_BUILD: ${{ inputs.build_number }}
+        run: |
+          python3 - <<'PY'
+          import os
+          raw = os.environ.get('REQUESTED_BUILD', '') or str(int(os.environ['GITHUB_RUN_NUMBER']) + 8)
+          if not raw.isdigit() or int(raw) < 25:
+              raise RuntimeError('Expected a numeric build number >= 25')
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write('BUILD_NUMBER=' + raw + '\n')
+          PY
       - name: Build unsigned iOS app
-        run: flutter build ios --release --no-pub --no-codesign --build-name=3.9.0 --build-number=$GITHUB_RUN_NUMBER
+        run: flutter build ios --release --no-pub --no-codesign --build-name=3.9.0 --build-number="$BUILD_NUMBER"
       - name: Package unsigned IPA for personal signing
         run: |
           set -euo pipefail
@@ -123,7 +202,19 @@ jobs:
           cd build/shortcut-package
           zip -qry BeeCount-shortcut-unsigned.ipa Payload
           unzip -tq BeeCount-shortcut-unsigned.ipa
-          shasum -a 256 BeeCount-shortcut-unsigned.ipa > SHA256SUMS.txt
+          python3 - <<'PY'
+          import json, os, plistlib, zipfile
+          with zipfile.ZipFile('BeeCount-shortcut-unsigned.ipa') as archive:
+              info = plistlib.loads(archive.read('Payload/Runner.app/Info.plist'))
+              assert info['CFBundleVersion'] == os.environ['BUILD_NUMBER'], 'Unexpected build number'
+              assert info['CFBundleShortVersionString'] == '3.9.0', 'Unexpected version'
+              assert 'Payload/Runner.app/' + info['CFBundleExecutable'] in archive.namelist(), 'Executable missing'
+          with open('build-info.json', 'w') as out:
+              json.dump({'source_sha': os.environ['GITHUB_SHA'], 'run_id': os.environ['GITHUB_RUN_ID'],
+                         'build_number': info['CFBundleVersion'], 'version': '3.9.0', 'signed': False}, out, indent=2)
+          PY
+          cp ../../LICENSE LICENSE.txt
+          shasum -a 256 BeeCount-shortcut-unsigned.ipa build-info.json LICENSE.txt > SHA256SUMS.txt
       # Upload as soon as this job finishes, without waiting for core-tests.
       # An available IPA is NOT a claim that tests or device acceptance passed.
       - name: Upload unsigned IPA immediately
@@ -133,6 +224,8 @@ jobs:
           path: |
             build/shortcut-package/BeeCount-shortcut-unsigned.ipa
             build/shortcut-package/SHA256SUMS.txt
+            build/shortcut-package/build-info.json
+            build/shortcut-package/LICENSE.txt
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
@@ -142,7 +235,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           echo "### iOS packaging: $JOB_STATUS" >> "$GITHUB_STEP_SUMMARY"
-          echo "If uploaded, the unsigned IPA is available in this run's artifacts. Check Core shortcut tests and Native billing tests separately; pending or failed tests do not block artifact upload. Physical-device acceptance is still required." >> "$GITHUB_STEP_SUMMARY"
+          echo "If uploaded, the unsigned IPA is available in this run's artifacts. Check analyzer/core, Billing and statistics widget tests and Native billing tests separately; pending or failed tests do not block artifact upload. Physical-device acceptance is still required." >> "$GITHUB_STEP_SUMMARY"
 
   native-tests:
     name: Native billing tests
@@ -186,6 +279,9 @@ jobs:
           xcodebuild test -workspace ios/Runner.xcworkspace -scheme Runner \
             -configuration Debug -destination "platform=iOS Simulator,id=$TEST_SIMULATOR_ID" \
             -only-testing:RunnerTests -resultBundlePath test-results/RunnerTests.xcresult \
+            -parallel-testing-enabled NO -maximum-concurrent-test-simulator-destinations 1 \
+            -test-timeouts-enabled YES -default-test-execution-time-allowance 60 \
+            -maximum-test-execution-time-allowance 120 \
             CODE_SIGNING_ALLOWED=NO 2>&1 | tee test-results/native-tests.log
       - name: Upload native test evidence
         if: always()

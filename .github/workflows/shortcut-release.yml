@@ -51,10 +51,14 @@ jobs:
           require(run['status'] == 'completed' and run['conclusion'] == 'success',
                   'Source run must finish successfully; early IPA artifacts remain available from Actions')
           jobs = api(f'repos/{repo}/actions/runs/{source}/jobs?per_page=100')['jobs']
-          for name in ['Core shortcut tests', 'Native billing tests', 'iOS build and package']:
+          for name in ['Core shortcut tests', 'Billing and statistics widget tests', 'Native billing tests', 'iOS build and package']:
               matches = [job for job in jobs if job['name'] == name]
               require(len(matches) == 1 and matches[0]['conclusion'] == 'success',
                       f'Required job not successful: {name}')
+          core = next(job for job in jobs if job['name'] == 'Core shortcut tests')
+          for name in ['Analyze application and test code', 'Run focused shortcut tests']:
+              require(any(step['name'] == name and step['conclusion'] == 'success'
+                          for step in core.get('steps', [])), f'Required check not successful: {name}')
           build = next(job for job in jobs if job['name'] == 'iOS build and package')
           for name in ['Build unsigned iOS app', 'Package unsigned IPA for personal signing',
                        'Upload unsigned IPA immediately']:
@@ -76,16 +80,27 @@ jobs:
           unzip -tq package/BeeCount-shortcut-unsigned.ipa
           cd package
           shasum -a 256 -c SHA256SUMS.txt
+          python3 - <<'PY'
+          import json, os, plistlib, zipfile
+          with open('build-info.json') as source: info = json.load(source)
+          assert info['source_sha'] == os.environ['SOURCE_SHA'], 'Source mismatch'
+          assert info['run_id'] == os.environ['SOURCE_RUN'], 'Run mismatch'
+          with zipfile.ZipFile('BeeCount-shortcut-unsigned.ipa') as archive:
+              plist = plistlib.loads(archive.read('Payload/Runner.app/Info.plist'))
+          assert plist['CFBundleVersion'] == info['build_number'], 'Build mismatch'
+          with open(os.environ['GITHUB_ENV'], 'a') as out:
+              out.write('SOURCE_BUILD_NUMBER=' + info['build_number'] + '\n')
+          PY
       - name: Publish downloadable release assets
         run: |
           set -euo pipefail
-          TAG="ios-shortcut-3.9.0-build-$SOURCE_NUMBER"
+          TAG="ios-shortcut-3.9.0-build-$SOURCE_BUILD_NUMBER"
           cat > release-notes.md <<EOF
           iOS 快捷记账个人 fork，基于 BeeCount 3.9.0。
 
           下载 BeeCount-shortcut-unsigned.ipa；这是未签名安装包，需自行签名安装。SHA256SUMS.txt 用于校验文件。
 
-          Flutter 核心/详情页测试、原生 RunnerTests 与 iOS Release 编译并行执行，三项均已通过后发布本预发布版。复用原构建的 IPA，不重新编译。核心测试通过不等于真实 AI 识别和目标 iPhone 弹窗、后台执行已验收，真机测试仍待完成。
+          Dart/Flutter analyzer 无错误；数据/快捷记账回归、账单/统计 Widget、原生 RunnerTests 与 iOS Release 编译均已通过后发布本预发布版（既有 lint 警告保留在检查日志）。复用原构建的 IPA，不重新编译。核心测试通过不等于真实 AI 识别和目标 iPhone 弹窗、后台执行已验收，真机测试仍待完成。
 
           编译完成时即可从 Actions 附件先行下载；测试未完成或失败时，不代表完整验证通过。
 
@@ -94,9 +109,12 @@ jobs:
           - 安装与快捷指令配置：https://github.com/$GH_REPO/blob/$SOURCE_SHA/docs/ios-shortcut-billing.md
           - 需求验收对照：https://github.com/$GH_REPO/blob/$SOURCE_SHA/docs/ios-shortcut-acceptance.md
           EOF
-          if ! gh release view "$TAG" --repo "$GH_REPO" > /dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GH_REPO" --target "$SOURCE_SHA" --title "BeeCount iOS 快捷记账 3.9.0 · Build $SOURCE_NUMBER" --notes-file release-notes.md --prerelease --draft --latest=false
+          # A build gets its own release. Never replace another published asset.
+          if gh release view "$TAG" --repo "$GH_REPO" > /dev/null 2>&1; then
+            echo "Release already exists; refusing to overwrite $TAG" >&2
+            exit 1
           fi
-          gh release upload "$TAG" package/BeeCount-shortcut-unsigned.ipa package/SHA256SUMS.txt --repo "$GH_REPO" --clobber
+          gh release create "$TAG" --repo "$GH_REPO" --target "$SOURCE_SHA" --title "BeeCount iOS 快捷记账 3.9.0 · Build $SOURCE_BUILD_NUMBER" --notes-file release-notes.md --prerelease --draft --latest=false
+          gh release upload "$TAG" package/BeeCount-shortcut-unsigned.ipa package/SHA256SUMS.txt package/build-info.json package/LICENSE.txt --repo "$GH_REPO"
           gh release edit "$TAG" --repo "$GH_REPO" --draft=false --prerelease --notes-file release-notes.md
           echo "Release: https://github.com/$GH_REPO/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
