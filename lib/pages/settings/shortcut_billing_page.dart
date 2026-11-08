@@ -11,6 +11,7 @@ import '../../providers.dart';
 import '../../services/automation/shortcut_service.dart';
 import '../../services/automation/shortcut_store.dart';
 import '../../services/automation/shortcut_schema.dart';
+import '../../services/automation/shortcut_rule_matcher.dart';
 import '../../utils/account_type_utils.dart';
 
 /// Personal shortcut settings. Rules are local and intentionally not cloud synced.
@@ -113,9 +114,14 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                             decoration:
                                 const InputDecoration(labelText: '规则名称')),
                         TextField(
+                            key: const Key('shortcut-rule-keyword'),
                             controller: keyword,
-                            decoration:
-                                const InputDecoration(labelText: '关键词')),
+                            decoration: InputDecoration(
+                                labelText: '关键词',
+                                helperMaxLines: 4,
+                                helperText: mode == ShortcutRuleMatcher.containsAny
+                                    ? '用英文 | 分隔，如：古茗|蜜雪冰城。命中任意一个即可；不是完整正则。最多100个、总长4096字符。'
+                                    : '按整段文字匹配；多个关键词请选“包含任意关键词”。')),
                         DropdownButtonFormField<String>(
                             value: field,
                             decoration:
@@ -130,6 +136,7 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                             ],
                             onChanged: (v) => update(() => field = v!)),
                         DropdownButtonFormField<String>(
+                            key: const Key('shortcut-rule-match-mode'),
                             value: mode,
                             decoration:
                                 const InputDecoration(labelText: '匹配方式'),
@@ -137,7 +144,10 @@ class _ShortcutBillingPageState extends ConsumerState<ShortcutBillingPage> {
                               DropdownMenuItem(
                                   value: 'contains', child: Text('包含')),
                               DropdownMenuItem(
-                                  value: 'exact', child: Text('完全匹配'))
+                                  value: 'exact', child: Text('完全匹配')),
+                              DropdownMenuItem(
+                                  value: ShortcutRuleMatcher.containsAny,
+                                  child: Text('包含任意关键词'))
                             ],
                             onChanged: (v) => update(() => mode = v!)),
                         DropdownButtonFormField<int>(

@@ -254,4 +254,20 @@ void main() {
     expect(ShortcutService.matchAccount(debitOnly, clue: '招商银行信用卡(1234)', text: ''), isNull);
   });
 
+
+  test('recognized local OCR matches either keyword in a personal multi rule', () async {
+    final alternative = await repo.createCategory(name: 'AI建议多词', kind: 'expense');
+    await ShortcutStore(repo).saveRule({'id': 'many-image-rule', 'name': '多关键词', 'enabled': 1,
+      'ledger_id': ledger, 'field': 'ocr', 'match_mode': 'contains_any',
+      'keyword': '古茗|蜜雪冰城', 'category_id': category, 'priority': 100});
+    final service = ShortcutService(container, extract: (_, __) async => jsonEncode([
+      {'type': 'expense', 'amount': '30', 'categoryId': alternative}
+    ]));
+    for (final brand in ['古茗', '蜜雪冰城']) {
+      final result = await service.handle({'operation': 'recognize', 'mode': 'image',
+        'imagePath': 'fixture.jpg', 'ruleText': '原文${brand}消费30元'});
+      expect(result['candidates'][0]['categoryId'], category);
+    }
+    expect(await db.select(db.transactions).get(), isEmpty);
+  });
 }

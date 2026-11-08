@@ -3,6 +3,7 @@ import 'package:beecount/data/repositories/local/local_repository.dart';
 import 'package:beecount/providers/database_providers.dart';
 import 'package:beecount/services/automation/shortcut_service.dart';
 import 'package:beecount/services/automation/shortcut_store.dart';
+import 'package:beecount/services/automation/shortcut_schema.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -133,4 +134,60 @@ void main() {
     expect(unrelated['parentName'], isNull);
   });
 
+
+  test('multiple keywords classify either brand; old single modes stay literal', () async {
+    await rule('multi', keyword: ' 古茗 | 蜜雪冰城 ', mode: 'contains_any');
+    expect((await classify(note: '古茗门店购买'))['categoryId'], personal);
+    expect((await classify(note: '付款蜜雪冰城'))['categoryId'], personal);
+    expect((await classify(note: 'zqx_no_matching_evidence'))['categoryId'], isNull);
+    final saved = (await ShortcutStore(repo).rules()).single;
+    expect(saved['match_mode'], 'contains_any');
+    expect(saved['keyword'], ' 古茗 | 蜜雪冰城 ');
+    await rule('multi', keyword: '古茗|蜜雪冰城', mode: 'contains');
+    // Built-in categories may still match a known brand, but this personal
+    // literal rule must no longer win without the pipe in the source.
+    expect((await classify(note: '古茗'))['categoryId'], isNot(personal));
+  });
+
+  test('multi-keyword mode respects merchant, note and original-text evidence', () async {
+    for (final field in ['merchant', 'note', 'ocr']) {
+      await rule('evidence', field: field, keyword: ' AlphaBrand | BetaBrand ', mode: 'contains_any');
+      expect((await classify(merchant: field == 'merchant' ? 'BetaBrand门店' : '',
+        note: field == 'note' ? '付款BETABRAND' : '',
+        fullText: field == 'ocr' ? '原文BetaBrand' : ''))['categoryId'], personal);
+      expect((await classify(merchant: field != 'merchant' ? 'BetaBrand' : '',
+        note: field != 'note' ? 'BetaBrand' : '',
+        fullText: field != 'ocr' ? 'BetaBrand' : ''))['categoryId'], isNull);
+    }
+  });
+
+  test('multi-keyword rules preserve scope, type, priority and explicit overrides', () async {
+    const keywords = '线索甲|线索乙';
+    await rule('wrong-ledger', keyword: keywords, mode: 'contains_any', target: dining, forLedger: otherLedger, priority: 1000);
+    await rule('disabled', keyword: keywords, mode: 'contains_any', target: dining, enabled: 0, priority: 900);
+    await rule('wrong-type', keyword: keywords, mode: 'contains_any', target: income, priority: 800);
+    await rule('winner', keyword: keywords, mode: 'contains_any', priority: 100);
+    await rule('lower', keyword: keywords, mode: 'contains_any', target: dining, priority: 1);
+    expect((await classify(note: '线索乙'))['categoryId'], personal);
+    expect((await classify(note: '线索乙', categoryId: dining))['categoryId'], dining);
+    expect((await classify(type: 'income', note: '线索乙'))['categoryId'], income);
+    expect((await classify(type: 'transfer', note: '线索乙'))['categoryId'], isNull);
+  });
+
+  test('saving invalid alternatives is rejected without replacing the old rule', () async {
+    await rule('edit', keyword: '古茗|蜜雪冰城', mode: 'contains_any');
+    for (final keyword in [' | || ', List.generate(101, (i) => 'term$i').join('|'), List.filled(4097, 'a').join()]) {
+      await expectLater(rule('edit', keyword: keyword, mode: 'contains_any'),
+        throwsA(isA<ShortcutFailure>().having((e) => e.code, 'code', 'INVALID_RULE')));
+    }
+    expect((await ShortcutStore(repo).rules()).single['keyword'], '古茗|蜜雪冰城');
+  });
+
+  test('all-empty corrupt multi rule cannot match everything or block a valid rule', () async {
+    await rule('bad', keyword: '古茗', mode: 'contains_any', target: dining, priority: 1000);
+    await db.customStatement('UPDATE shortcut_rules SET keyword = ? WHERE id = ?', ['|||', 'bad']);
+    await rule('good', keyword: '线索甲|线索乙', mode: 'contains_any');
+    expect((await classify(note: '线索乙'))['categoryId'], personal);
+    expect((await classify(note: 'zqx_no_matching_evidence'))['categoryId'], isNull);
+  });
 }

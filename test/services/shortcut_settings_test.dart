@@ -103,4 +103,48 @@ void main() {
     expect(await ShortcutStore(repo).rules(), isEmpty);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('multi-keyword rule mode and expression survive save and reopen', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final db = BeeDatabase.forTesting(NativeDatabase.memory());
+    final repo = LocalRepository(db);
+    addTearDown(db.close);
+    await repo.createLedger(name: '个人账本');
+    await repo.createCategory(name: '咖啡奶茶', kind: 'expense');
+    tester.view.physicalSize = const Size(1000, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(ProviderScope(
+      overrides: [repositoryProvider.overrideWithValue(repo)],
+      child: const MaterialApp(home: ShortcutBillingPage())));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.add));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).at(0), '奶茶多关键词');
+    await tester.enterText(find.byKey(const Key('shortcut-rule-keyword')), '古茗|蜜雪冰城');
+    await tester.tap(find.byKey(const Key('shortcut-rule-match-mode')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('包含任意关键词').last);
+    await tester.pumpAndSettle();
+    expect(find.textContaining('不是完整正则'), findsOneWidget);
+    await tester.tap(find.text('目标分类'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('支出 · 咖啡奶茶').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    final saved = (await ShortcutStore(repo).rules()).single;
+    expect(saved['keyword'], '古茗|蜜雪冰城');
+    expect(saved['match_mode'], 'contains_any');
+    await tester.tap(find.text('奶茶多关键词'));
+    await tester.pumpAndSettle();
+    expect(find.text('包含任意关键词'), findsOneWidget);
+    expect(tester.widget<TextField>(find.byKey(const Key('shortcut-rule-keyword'))).controller!.text, '古茗|蜜雪冰城');
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+  });
 }

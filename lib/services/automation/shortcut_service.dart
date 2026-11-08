@@ -13,6 +13,7 @@ import '../system/logger_service.dart';
 import '../../utils/account_type_utils.dart';
 import 'shortcut_schema.dart';
 import 'shortcut_store.dart';
+import 'shortcut_rule_matcher.dart';
 
 const shortcutDefaultsKey = 'shortcut_billing_defaults_v1';
 
@@ -167,10 +168,9 @@ class ShortcutService {
         'note' => note,
         _ => ruleText
       };
-      final key = (rule['keyword'] as String).toLowerCase();
-      final hit = rule['match_mode'] == 'exact'
-          ? source.toLowerCase() == key
-          : source.toLowerCase().contains(key);
+      final hit = ShortcutRuleMatcher.matches(
+          source: source, keyword: rule['keyword'] as String,
+          mode: rule['match_mode'] as String);
       if (!hit) continue;
       if (!usable.any((c) => c.id == rule['category_id'])) {
         warnings.add('个人规则目标分类已失效');

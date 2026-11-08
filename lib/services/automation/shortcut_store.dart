@@ -7,6 +7,7 @@ import '../../data/db.dart';
 import '../../data/repositories/local/local_repository.dart';
 import '../../utils/account_type_utils.dart';
 import 'shortcut_schema.dart';
+import 'shortcut_rule_matcher.dart';
 
 class ShortcutStore {
   final LocalRepository repo;
@@ -274,10 +275,15 @@ class ShortcutStore {
 
   Future<void> saveRule(Map<String, dynamic> rule) async {
     if (!['merchant', 'note', 'ocr'].contains(rule['field']) ||
-        !['contains', 'exact'].contains(rule['match_mode']) ||
+        !ShortcutRuleMatcher.modes.contains(rule['match_mode']) ||
         (rule['keyword'] as String).trim().isEmpty ||
         (rule['name'] as String).trim().isEmpty) {
       throw const ShortcutFailure('INVALID_RULE', '请填写规则名称、关键词及有效匹配方式');
+    }
+    if (rule['match_mode'] == ShortcutRuleMatcher.containsAny &&
+        !ShortcutRuleMatcher.validMany(rule['keyword'] as String)) {
+      throw const ShortcutFailure('INVALID_RULE',
+          '请用英文 | 分隔关键词，至少填写一个有效关键词；最多100个、总长不超过4096字符');
     }
     final cats = [
       ...await repo.getUsableCategories('expense'),
