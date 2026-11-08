@@ -76,33 +76,35 @@ class DailySpendingWidgetObserver extends ProviderObserver
       while (_pending) {
         _pending = false;
         final container = _container;
-        if (container == null ||
-            container.read(appInitStateProvider) != AppInitState.ready) {
-          return;
-        }
-        final revision = _revision;
-        final repository = container.read(repositoryProvider);
-        final ledgerId = container.read(currentLedgerIdProvider);
-        final locale = resolveAppLocalizations(container.read(languageProvider));
+        if (container == null) return;
         try {
+          if (container.read(appInitStateProvider) != AppInitState.ready) return;
+          final revision = _revision;
+          final repository = container.read(repositoryProvider);
+          final ledgerId = container.read(currentLedgerIdProvider);
+          final locale = resolveAppLocalizations(container.read(languageProvider));
           final snapshot = await DailySpendingWidgetDataService.gather(
               repository: repository, ledgerId: ledgerId);
           // Switching ledger / repository while gathering must not publish the
           // old ledger over a newer snapshot. Serialize writes and retry latest.
           if (revision != _revision) continue;
-          final payload = snapshot?.toJson(
-                locale: locale.localeName,
-                currencySymbol: getCurrencySymbol(snapshot.currency),
-              ) ??
-              <String, Object?>{};
+          final payload = snapshot == null
+              ? <String, Object?>{}
+              : snapshot.toJson(
+                  locale: locale.localeName,
+                  currencySymbol: getCurrencySymbol(snapshot.currency),
+                );
           // One encoded value: the extension never sees half of a new snapshot.
           await HomeWidget.saveWidgetData<String>(dataKey, jsonEncode(payload));
           if (revision != _revision) continue;
           await HomeWidget.updateWidget(iOSName: kind);
         } catch (error) {
           // Do not log amounts, account data or raw database/network exceptions.
-          logger.warning('DailySpendingWidget',
-              '桌面花销组件更新未完成 (${error.runtimeType})');
+          // Even a log observer must not make this unawaited task fail.
+          try {
+            logger.warning('DailySpendingWidget',
+                '桌面花销组件更新未完成 (${error.runtimeType})');
+          } catch (_) {}
         }
       }
     } finally {
