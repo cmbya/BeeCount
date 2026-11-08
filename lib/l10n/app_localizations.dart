@@ -63,6 +63,45 @@ import 'app_localizations_zh.dart';
 /// be consistent with the languages listed in the AppLocalizations.supportedLocales
 /// property.
 abstract class AppLocalizations {
+  /// Refund flow.
+  String get refundAccount;
+  /// Refund flow.
+  String get refundAccountAndDate;
+  /// Refund flow.
+  String get refundAccountMissing;
+  /// Refund flow.
+  String get refundActualAmount;
+  /// Refund flow.
+  String get refundAdd;
+  /// Refund flow.
+  String get refundAmount;
+  /// Refund flow.
+  String get refundDate;
+  /// Refund flow.
+  String get refundDifferentAmount;
+  /// Refund flow.
+  String get refundExceeds;
+  /// Refund flow.
+  String get refundHistory;
+  /// Refund flow.
+  String get refundInherited;
+  /// Refund flow.
+  String get refundLockHint;
+  /// Refund flow.
+  String get refundMaximum;
+  /// Refund flow.
+  String get refundOriginal;
+  /// Refund flow.
+  String get refundOriginalMissing;
+  /// Refund flow.
+  String get refundRecord;
+  /// Refund flow.
+  String get refundSaveFailed;
+  /// Refund flow.
+  String get refundStale;
+  /// Refund flow.
+  String get refundTitle;
+
   AppLocalizations(String locale) : localeName = intl.Intl.canonicalizedLocale(locale.toString());
 
   final String localeName;

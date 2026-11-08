@@ -1,5 +1,6 @@
 import 'package:drift/drift.dart' as d;
 import '../data/db.dart';
+import '../models/refund_identity.dart';
 import '../data/repositories/base_repository.dart';
 import '../data/repositories/transaction_repository.dart' show BatchAttachmentData;
 import 'currency/rate_math.dart';
@@ -510,6 +511,7 @@ class DataImportService {
     }
 
     for (final tx in transactions) {
+      final refund = RefundIdentity.isRefund(tx.syncId);
       // 解析分类ID
       int? categoryId;
       if (tx.categoryId != null) {
@@ -596,7 +598,7 @@ class DataImportService {
       // 构建交易记录
       final txCompanion = TransactionsCompanion.insert(
         ledgerId: ledgerId,
-        type: tx.type,
+        type: refund ? 'income' : tx.type,
         amount: tx.amount,
         categoryId: d.Value(tx.type == 'transfer' ? null : categoryId),
         accountId: d.Value(accountId),
@@ -605,9 +607,9 @@ class DataImportService {
         note: d.Value(tx.note),
         syncId: d.Value(tx.syncId),
         currencyCode: d.Value(txCurrency),
-        nativeAmount: d.Value(tx.nativeAmount ?? txNative),
-        excludeFromBudget: d.Value(tx.excludeFromBudget),
-        excludeFromStats: d.Value(tx.excludeFromStats),
+        nativeAmount: d.Value(refund ? tx.nativeAmount : tx.nativeAmount ?? txNative),
+        excludeFromBudget: d.Value(refund || tx.excludeFromBudget),
+        excludeFromStats: d.Value(refund || tx.excludeFromStats),
       );
 
       final indexInBatch = batchTx.length;

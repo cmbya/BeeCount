@@ -96,8 +96,12 @@ extension SyncEngineApplyExt on SyncEngine {
         -1;
 
     // 解析 payload 字段
-    final type = payload['type'] as String? ?? 'expense';
+    final refund = RefundIdentity.isRefund(syncId);
+    final type = refund ? 'income' : payload['type'] as String? ?? 'expense';
     final amount = (payload['amount'] as num?)?.toDouble() ?? 0.0;
+    if (refund && (!amount.isFinite || amount <= 0)) {
+      throw StateError('invalid_refund_amount');
+    }
     final happenedAtStr = payload['happenedAt'] as String?;
     final happenedAt = happenedAtStr != null
         ? DateTime.tryParse(happenedAtStr)?.toLocal() ?? DateTime.now()
@@ -195,10 +199,10 @@ extension SyncEngineApplyExt on SyncEngine {
     // 账单标记(D6 缺键保留):payload 不含该键 → null → update 走
     // Value.absent() 不覆盖本地;含键(包括显式 false)→ 覆盖。insert 路径
     // null 落默认 false。键名 camelCase 与 server 契约对齐。
-    final excludeStats = payload.containsKey('excludeFromStats')
+    final excludeStats = refund ? true : payload.containsKey('excludeFromStats')
         ? (payload['excludeFromStats'] as bool? ?? false)
         : null;
-    final excludeBudget = payload.containsKey('excludeFromBudget')
+    final excludeBudget = refund ? true : payload.containsKey('excludeFromBudget')
         ? (payload['excludeFromBudget'] as bool? ?? false)
         : null;
 
@@ -287,7 +291,7 @@ extension SyncEngineApplyExt on SyncEngine {
               // 迁移回填同口径,外币账户交易由 L11 检测捞回);currencyCode
               // 留 NULL(检测端 LEFT JOIN 账户币种兜底)。
               currencyCode: d.Value(payloadCurrency),
-              nativeAmount: d.Value(hasNativeKey ? payloadNative : amount),
+              nativeAmount: d.Value(hasNativeKey ? payloadNative : refund ? null : amount),
             ),
           );
       // 写回 cache,后续同 syncId 的 update change 能命中

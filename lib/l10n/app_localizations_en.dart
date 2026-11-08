@@ -7,6 +7,45 @@ import 'app_localizations.dart';
 /// The translations for English (`en`).
 class AppLocalizationsEn extends AppLocalizations {
   @override
+  String get refundAccount => "Credit account";
+  @override
+  String get refundAccountAndDate => "Account and date";
+  @override
+  String get refundAccountMissing => "The original payment account is unavailable. Restore or correct it before refunding.";
+  @override
+  String get refundActualAmount => "Actual amount received";
+  @override
+  String get refundAdd => "Add refund";
+  @override
+  String get refundAmount => "Refund amount";
+  @override
+  String get refundDate => "Credit date";
+  @override
+  String get refundDifferentAmount => "Actual amount differs from bill amount";
+  @override
+  String get refundExceeds => "Refund must be positive and not exceed the remaining refundable amount.";
+  @override
+  String get refundHistory => "Refund history";
+  @override
+  String get refundInherited => "The date and account follow the original expense. The expense is kept; the refund credits this account once and does not restore budget.";
+  @override
+  String get refundLockHint => "Refunds cannot be edited or copied as ordinary bills. Remove linked refunds before changing the original amount, date, currency or account, moving or deleting it.";
+  @override
+  String get refundMaximum => "Maximum";
+  @override
+  String get refundOriginal => "Original bill";
+  @override
+  String get refundOriginalMissing => "The original bill is unavailable.";
+  @override
+  String get refundRecord => "Refund record";
+  @override
+  String get refundSaveFailed => "Unable to save the refund. Check permissions, account and amount, then try again.";
+  @override
+  String get refundStale => "The bill or remaining refundable amount changed. Reopen this page before saving.";
+  @override
+  String get refundTitle => "Refund";
+
+  @override
   String get homeRemainingBudget => "Remaining monthly budget";
   @override
   String get homeDailyRemaining => "Daily available";

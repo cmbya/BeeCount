@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import '../../models/refund_identity.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_list_view/flutter_list_view.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 import '../../data/db.dart';
+import '../../data/repositories/local/local_repository.dart';
 import '../../providers.dart';
 import '../../providers/budget_providers.dart';
 import '../../services/system/logger_service.dart';
@@ -426,6 +428,8 @@ class TransactionListState extends ConsumerState<TransactionList> {
             final list = item.$3 as List<({Transaction t, Category? category, Account? account, Account? toAccount})>;
             double dayIncome = 0, dayExpense = 0;
             for (final it in list) {
+              // A refund credit is shown in the list but is not ordinary income.
+              if (RefundIdentity.isRefund(it.t.syncId)) continue;
               // 转账不计入收支统计
               if (it.t.type == 'income') {
                 dayIncome += it.t.nativeAmount ?? it.t.amount;
@@ -504,6 +508,12 @@ class TransactionListState extends ConsumerState<TransactionList> {
                 child: const Icon(Icons.delete, color: Colors.white),
               ),
               confirmDismiss: (direction) async {
+                final repo = ref.read(repositoryProvider);
+                if (repo is LocalRepository && await repo.hasTransactionRefunds(it.t.id)) {
+                  if (context.mounted) showToast(context, AppLocalizations.of(context).refundLockHint);
+                  return false;
+                }
+                if (!context.mounted) return false;
                 return await AppDialog.confirm<bool>(
                       context,
                       title: AppLocalizations.of(context).deleteConfirmTitle,
@@ -547,17 +557,21 @@ class TransactionListState extends ConsumerState<TransactionList> {
                       return TransactionListItem(
                         icon: getCategoryIconData(category: it.category, categoryName: categoryName),
                         category: it.category,
-                        title: isTransfer
+                        title: RefundIdentity.isRefund(it.t.syncId) && subtitle.isEmpty
+                            ? AppLocalizations.of(context).refundTitle : isTransfer
                             ? (subtitle.isNotEmpty
                                 ? subtitle
                                 : AppLocalizations.of(context).transferTitle)
                             : subtitle,
-                        categoryName: isTransfer ? null : categoryName,
+                        categoryName: RefundIdentity.isRefund(it.t.syncId)
+                            ? AppLocalizations.of(context).refundTitle
+                            : isTransfer ? null : categoryName,
                         amount: it.t.amount,
                         currencyCode: it.t.currencyCode,
                         nativeAmount: it.t.nativeAmount,
                         isExpense: isExpense,
                         isTransfer: isTransfer,
+                        isRefund: RefundIdentity.isRefund(it.t.syncId),
                         hide: widget.hideAmounts,
                         happenedAt: it.t.happenedAt,
                         accountName: isTransfer

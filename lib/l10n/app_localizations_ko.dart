@@ -7,6 +7,45 @@ import 'app_localizations.dart';
 /// The translations for Korean (`ko`).
 class AppLocalizationsKo extends AppLocalizations {
   @override
+  String get refundAccount => "입금 계좌";
+  @override
+  String get refundAccountAndDate => "계좌 및 날짜";
+  @override
+  String get refundAccountMissing => "원래 결제 계좌를 사용할 수 없습니다. 계좌를 복원하거나 수정한 후 환불하세요.";
+  @override
+  String get refundActualAmount => "실제 입금액";
+  @override
+  String get refundAdd => "환불 추가";
+  @override
+  String get refundAmount => "환불 금액";
+  @override
+  String get refundDate => "입금 날짜";
+  @override
+  String get refundDifferentAmount => "실제 금액이 거래 금액과 다름";
+  @override
+  String get refundExceeds => "환불 금액은 0보다 크고 남은 환불 가능 금액 이하여야 합니다.";
+  @override
+  String get refundHistory => "환불 내역";
+  @override
+  String get refundInherited => "원래 지출의 날짜와 계좌를 사용합니다. 지출은 유지되고 계좌에 한 번만 입금됩니다. 예산은 복구되지 않습니다.";
+  @override
+  String get refundLockHint => "환불은 일반 거래로 수정하거나 복사할 수 없습니다. 원래 거래의 금액, 날짜, 통화, 계좌를 변경하거나 이동 또는 삭제하려면 연결된 환불을 먼저 삭제하세요.";
+  @override
+  String get refundMaximum => "최대";
+  @override
+  String get refundOriginal => "원래 거래";
+  @override
+  String get refundOriginalMissing => "원래 거래를 찾을 수 없습니다.";
+  @override
+  String get refundRecord => "환불 기록";
+  @override
+  String get refundSaveFailed => "환불을 저장하지 못했습니다. 권한, 계좌 및 금액을 확인하고 다시 시도하세요.";
+  @override
+  String get refundStale => "거래 또는 남은 환불 가능 금액이 변경되었습니다. 환불 화면을 다시 여세요.";
+  @override
+  String get refundTitle => "환불";
+
+  @override
   String get homeRemainingBudget => "남은 월 예산";
   @override
   String get homeDailyRemaining => "하루 사용 가능";

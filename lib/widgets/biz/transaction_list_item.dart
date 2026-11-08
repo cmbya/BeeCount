@@ -47,6 +47,7 @@ class TransactionListItem extends ConsumerWidget {
   final int attachmentCount; // 附件数量
   final VoidCallback? onAttachmentTap; // 点击附件图标回调
 
+  final bool isRefund;
   final bool excludeFromStats; // 不计入收支:第二行显示「不计收支」标签
   final bool excludeFromBudget; // 不计入预算:第二行显示「不计预算」标签
 
@@ -77,6 +78,7 @@ class TransactionListItem extends ConsumerWidget {
       this.onTagTap,
       this.attachmentCount = 0,
       this.onAttachmentTap,
+      this.isRefund = false,
       this.excludeFromStats = false,
       this.excludeFromBudget = false,
   });
@@ -95,6 +97,7 @@ class TransactionListItem extends ConsumerWidget {
     return showTime ||
         accountName != null ||
         attachmentCount > 0 ||
+        isRefund ||
         excludeFromStats ||
         excludeFromBudget;
   }
@@ -181,9 +184,10 @@ class TransactionListItem extends ConsumerWidget {
     // 「不计收支 / 不计预算」标签:第二行末尾的次要标签，改为与标签 chip 一致的
     // 中性 pill 样式（de-emphasis，沿用 TagChip 的中性灰底 + pill 圆角）
     final flagTags = <Widget>[
-      if (excludeFromStats)
+      if (isRefund) _flagChip(context, AppLocalizations.of(context).refundTitle),
+      if (excludeFromStats && !isRefund)
         _flagChip(context, AppLocalizations.of(context).txFlagExcludedTag),
-      if (excludeFromBudget)
+      if (excludeFromBudget && !isRefund)
         _flagChip(context, AppLocalizations.of(context).txFlagBudgetExcludedTag),
     ];
 

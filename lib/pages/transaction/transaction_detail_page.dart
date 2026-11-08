@@ -1,5 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import '../../models/refund_identity.dart';
+import 'refund_page.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import '../../data/db.dart';
@@ -44,8 +46,12 @@ class _TransactionDetailPageState extends ConsumerState<TransactionDetailPage> {
   bool _loading = true;
   bool _busy = false;
   bool _failed = false;
+  List<Transaction> _refunds = const [];
   AppLocalizations get l10n => AppLocalizations.of(context);
-  bool get _editable => _data != null && TransactionDetailService.canEdit(_data!.ledger) && !_busy;
+  bool get _canWrite => _data != null && TransactionDetailService.canEdit(_data!.ledger) && !_busy;
+  bool get _isRefund => RefundIdentity.isRefund(_data?.tx.syncId);
+  bool get _editable => _canWrite && !_isRefund;
+  bool get _canChangeMoney => _editable && _refunds.isEmpty;
 
   @override
   void initState() { super.initState(); _reload(); }
@@ -77,6 +83,9 @@ class _TransactionDetailPageState extends ConsumerState<TransactionDetailPage> {
       }
       selectedTags = TransactionDetailService.uniqueTags(selectedTags);
       final attachments = await repo.getAttachmentsByTransaction(tx.id);
+      final refunds = repo is LocalRepository && tx.syncId != null
+          ? await repo.getRefundTransactions(tx.syncId!, ledgerId: tx.ledgerId) : <Transaction>[];
+      _refunds = refunds;
       if (mounted) setState(() { _data = _DetailData(tx, ledger, categories, accounts, tags, selectedTags, attachments); _loading = false; _failed = false; });
     } catch (_) {
       if (mounted) setState(() { _loading = false; _failed = true; });
@@ -268,13 +277,36 @@ class _TransactionDetailPageState extends ConsumerState<TransactionDetailPage> {
     }
   }
   Future<void> _editAll() async {
-    if (!_editable) return;
+    if (!_canChangeMoney) return;
     await TransactionEditUtils.editTransaction(context, ref, _data!.tx, null);
     if (mounted) await _reload();
   }
+  Future<void> _refund() async {
+    if (!_editable || _data!.tx.type != 'expense') return;
+    final saved = await Navigator.of(context).push<bool>(MaterialPageRoute(
+      builder: (_) => RefundPage(transactionId: widget.transactionId)));
+    if (mounted && saved == true) await _reload();
+  }
+
+  Future<void> _openOriginal() async {
+    final identity = RefundIdentity.parse(_data!.tx.syncId);
+    if (identity == null) return;
+    final repo = ref.read(repositoryProvider);
+    final source = repo is LocalRepository
+        ? await (repo.db.select(repo.db.transactions)..where((t) =>
+            t.syncId.equals(identity.originalSyncId) & t.ledgerId.equals(_data!.tx.ledgerId)))
+            .getSingleOrNull()
+        : await repo.getTransactionBySyncId(identity.originalSyncId);
+    if (!mounted) return;
+    if (source == null) { showToast(context, l10n.refundOriginalMissing); return; }
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) =>
+      TransactionDetailPage(transactionId: source.id)));
+    if (mounted) await _reload();
+  }
+
   Future<void> _delete() async {
     final ok = await AppDialog.confirm<bool>(context, title: l10n.deleteConfirmTitle, message: l10n.deleteConfirmMessage);
-    if (ok != true || !mounted || !_editable) return;
+    if (ok != true || !mounted || !_canWrite || _refunds.isNotEmpty) return;
     setState(() => _busy = true);
     try {
       final latest = await ref.read(repositoryProvider).getTransactionById(widget.transactionId);
@@ -308,26 +340,41 @@ class _TransactionDetailPageState extends ConsumerState<TransactionDetailPage> {
       body: _loading ? const Center(child: CircularProgressIndicator()) : data == null || _failed
         ? Center(child: TextButton(onPressed: () { setState(() => _loading = true); _reload(); }, child: Text(_failed ? l10n.commonFailed : l10n.commonEmpty)))
         : AbsorbPointer(absorbing: _busy, child: ListView(padding: const EdgeInsets.fromLTRB(16, 16, 16, 32), children: [
-          Row(children: [_action(Icons.edit_outlined, l10n.commonEdit, Colors.blue, _editable ? _editAll : null), const SizedBox(width: 14),
-            _action(Icons.delete_outline, l10n.commonDelete, Colors.red, _editable ? _delete : null)]), const SizedBox(height: 22),
+          Row(children: [_action(Icons.edit_outlined, l10n.commonEdit, Colors.blue, _canChangeMoney ? _editAll : null), const SizedBox(width: 14),
+            _action(Icons.delete_outline, l10n.commonDelete, Colors.red, _canWrite && _refunds.isEmpty ? _delete : null)]), const SizedBox(height: 22),
           _card([
-            _row('category', _label(l10n.billCardType), '${data.tx.type == 'income' ? l10n.categoryIncome : data.tx.type == 'transfer' ? l10n.transferTitle : l10n.categoryExpense}${data.tx.type == 'transfer' ? '' : ' · $_categoryName'}', _editable ? _editCategory : null),
-            _row('ledger', l10n.transactionReceiptLedger, data.ledger.name, _editable ? _editLedger : null)]),
+            _row('category', _label(l10n.billCardType), '${_isRefund ? l10n.refundTitle : data.tx.type == 'income' ? l10n.categoryIncome : data.tx.type == 'transfer' ? l10n.transferTitle : l10n.categoryExpense}${_isRefund || data.tx.type == 'transfer' ? '' : ' · $_categoryName'}', _editable ? _editCategory : null),
+            _row('ledger', l10n.transactionReceiptLedger, data.ledger.name, _canChangeMoney ? _editLedger : null)]),
           _card([
-            _row('time', _label(l10n.billCardTime), DateFormat('yyyy-MM-dd HH:mm:ss').format(data.tx.happenedAt), _editable ? _editDate : null),
-            _row('amount', _label(l10n.billCardAmount), NumberFormat.currency(name: _currency, symbol: getCurrencySymbol(_currency)).format(data.tx.amount), _editable ? _editAmount : null),
-            _row('currency', l10n.txCurrencyLabel, displayCurrency(_currency, context), _editable ? _editCurrency : null),
-            _row('account', data.tx.type == 'transfer' ? l10n.exportCsvHeaderFromAccount : _label(l10n.billCardAccount), _accountName(false), _editable ? () => _editAccount(false) : null),
+            _row('time', _label(l10n.billCardTime), DateFormat('yyyy-MM-dd HH:mm:ss').format(data.tx.happenedAt), _canChangeMoney ? _editDate : null),
+            _row('amount', _label(l10n.billCardAmount), NumberFormat.currency(name: _currency, symbol: getCurrencySymbol(_currency)).format(data.tx.amount), _canChangeMoney ? _editAmount : null),
+            _row('currency', l10n.txCurrencyLabel, displayCurrency(_currency, context), _canChangeMoney ? _editCurrency : null),
+            _row('account', data.tx.type == 'transfer' ? l10n.exportCsvHeaderFromAccount : _label(l10n.billCardAccount), _accountName(false), _canChangeMoney ? () => _editAccount(false) : null),
             if (data.tx.type == 'transfer') _row('destination', l10n.exportCsvHeaderToAccount, _accountName(true), _editable ? () => _editAccount(true) : null)]),
           _card([
             _row('note', _label(l10n.billCardNote), data.tx.note?.isNotEmpty == true ? data.tx.note! : l10n.commonEmpty, _editable ? _editNote : null),
             _row('tags', l10n.transactionReceiptTags, data.selectedTags.isEmpty ? l10n.commonEmpty : data.selectedTags.map((t) => '#${t.name}').join('  '), _editable ? _editTags : null),
             _row('images', l10n.transactionDetailImages, data.attachments.isEmpty ? l10n.commonEmpty : '${data.attachments.length}', !_busy && (_editable || data.attachments.isNotEmpty) ? _images : null)]),
-          if (data.tx.type != 'transfer') _card([
+          if (data.tx.type != 'transfer' && !_isRefund) _card([
             SwitchListTile(key: const Key('detail-stats'), title: Text(l10n.txFlagExcludeFromStats), value: data.tx.excludeFromStats,
               onChanged: _editable ? (v) => _save({'excludeFromStats': v}) : null),
             if (data.tx.type == 'expense') SwitchListTile(key: const Key('detail-budget'), title: Text(l10n.txFlagExcludeFromBudget), value: data.tx.excludeFromBudget,
               onChanged: _editable ? (v) => _save({'excludeFromBudget': v}) : null)]),
+          if (data.tx.type == 'expense') _card([
+            _row('refund', l10n.refundTitle,
+              _refunds.isEmpty ? l10n.refundAdd
+                : NumberFormat.currency(name: _currency, symbol: getCurrencySymbol(_currency))
+                    .format(_refunds.fold<double>(0, (sum, row) => sum + row.amount)),
+              _editable ? _refund : null),
+            for (final row in _refunds) _row('refund-${row.id}', l10n.refundRecord,
+              NumberFormat.currency(name: _currency, symbol: getCurrencySymbol(_currency)).format(row.amount),
+              () async { await Navigator.of(context).push(MaterialPageRoute(builder: (_) =>
+                TransactionDetailPage(transactionId: row.id))); if (mounted) await _reload(); }),
+          ]),
+          if (_isRefund) _card([_row('refund-original', l10n.refundOriginal,
+            l10n.commonDetail, _openOriginal)]),
+          if (_refunds.isNotEmpty || _isRefund) Padding(padding: const EdgeInsets.all(12),
+            child: Text(l10n.refundLockHint, style: TextStyle(color: BeeTokens.textSecondary(context)))),
           if (_busy) const LinearProgressIndicator(),
         ])));
   }

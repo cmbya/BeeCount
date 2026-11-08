@@ -11,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../data/db.dart';
+import '../../models/refund_identity.dart';
 import '../../data/repositories/base_repository.dart';
 import '../../services/custom_icon_service.dart';
 import '../../services/system/logger_service.dart';

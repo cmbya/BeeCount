@@ -1,5 +1,6 @@
 import 'dart:convert';
 import '../data/db.dart';
+import '../models/refund_identity.dart';
 import '../data/repositories/base_repository.dart';
 import '../services/data_import_service.dart';
 import '../utils/app_localizations_resolver.dart';
@@ -147,12 +148,12 @@ Future<String> exportTransactionsJson(BeeDatabase db, int ledgerId) async {
     }
 
     final item = <String, dynamic>{
-      'type': t.type,
+      'type': RefundIdentity.isRefund(t.syncId) ? 'income' : t.type,
       'amount': t.amount,
-      'excludeFromBudget': t.excludeFromBudget,
-      'excludeFromStats': t.excludeFromStats,
+      'excludeFromBudget': RefundIdentity.isRefund(t.syncId) || t.excludeFromBudget,
+      'excludeFromStats': RefundIdentity.isRefund(t.syncId) || t.excludeFromStats,
       if (t.currencyCode != null) 'currencyCode': t.currencyCode,
-      if (t.nativeAmount != null) 'nativeAmount': t.nativeAmount,
+      if (t.nativeAmount != null || RefundIdentity.isRefund(t.syncId)) 'nativeAmount': t.nativeAmount,
       'categoryName': catInfo?['name'],
       'categoryKind': catInfo?['kind'],
       'happenedAt': t.happenedAt.toUtc().toIso8601String(),
@@ -383,12 +384,13 @@ ImportData parseJsonToImportData(String jsonStr) {
         }).toList();
       }
 
-      final type = it['type'] as String;
+      final refund = RefundIdentity.isRefund(it['syncId'] as String?);
+      final type = refund ? 'income' : it['type'] as String;
       transactions.add(ImportTransaction(
         type: type,
         amount: (it['amount'] as num).toDouble(),
-        excludeFromBudget: it['excludeFromBudget'] == true,
-        excludeFromStats: it['excludeFromStats'] == true,
+        excludeFromBudget: refund || it['excludeFromBudget'] == true,
+        excludeFromStats: refund || it['excludeFromStats'] == true,
         currencyCode: it['currencyCode'] as String?,
         nativeAmount: (it['nativeAmount'] as num?)?.toDouble(),
         categoryName: it['categoryName'] as String?,

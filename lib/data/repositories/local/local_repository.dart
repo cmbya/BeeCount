@@ -1,5 +1,9 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart' as d;
 import 'package:uuid/uuid.dart';
+
+import '../../../models/refund_identity.dart';
 
 import '../../db.dart';
 import '../../../cloud/sync/change_tracker.dart';
@@ -364,7 +368,14 @@ class LocalRepository extends BaseRepository {
   }) => db.transaction(() async {
     // v30 带折算兜底(02 §六):任何调用方(单币种记账/AI/周期模板)未传两字段
     // 时在此补齐 —— 外币先查有效汇率,取不到才 =amount(命中 L11 检测可捞回)。
-    final (cc, na) = await _resolveTxCurrency(
+    final refund = RefundIdentity.isRefund(syncId);
+    if (refund && (type != 'income' || !excludeFromStats || !excludeFromBudget ||
+        currencyCode == null || (accountId == null && accountSyncIdOverride == null))) {
+      throw StateError('invalid_refund');
+    }
+    // RefundService already inherited the source monetary snapshot. Preserve a
+    // legacy NULL rather than resolving today's exchange rate for this credit.
+    final (cc, na) = refund ? (currencyCode, nativeAmount) : await _resolveTxCurrency(
       ledgerId: ledgerId,
       accountId: accountId,
       amount: amount,
@@ -464,6 +475,25 @@ class LocalRepository extends BaseRepository {
     double? nativeAmount,
   }) => db.transaction(() async {
     final old = await _transactionRepo.getTransactionById(id);
+    if (old != null && RefundIdentity.isRefund(old.syncId)) {
+      throw StateError('refund_managed');
+    }
+    if (old != null && await hasTransactionRefunds(id)) {
+      final nextAccount = accountId is d.Value<int?> ? accountId.value
+          : accountId is int ? accountId : old.accountId;
+      final accountCurrency = old.accountSyncIdOverride != null
+          ? await getAccountCurrencyByAnyId(syntheticIdForSyncId(old.accountSyncIdOverride!))
+          : old.accountId == null ? null : (await getAccount(old.accountId!))?.currency;
+      final currentCurrency = old.currencyCode ?? accountCurrency ??
+          (await getLedgerById(old.ledgerId))?.currency;
+      if (type != old.type || amount != old.amount || nextAccount != old.accountId ||
+          (happenedAt != null && happenedAt != old.happenedAt) ||
+          accountSyncIdOverride != old.accountSyncIdOverride ||
+          (currencyCode != null && currencyCode.toUpperCase() != currentCurrency?.toUpperCase()) ||
+          (nativeAmount != null && nativeAmount != old.nativeAmount)) {
+        throw StateError('refund_original_locked');
+      }
+    }
     // v30 联动兜底(与 Cloud merge/mutator 的 L14 同规则):调用方不传两字段时——
     //   a) 账户变了(如转账换账户对,transfer_form 不传币种)→ 币种应跟随新
     //      账户,按新币种重新解析+折算(审查发现:原只联动 amount,换账户后
@@ -542,6 +572,7 @@ class LocalRepository extends BaseRepository {
 
   @override
   Future<void> deleteTransaction(int id) => db.transaction(() async {
+    if (await hasTransactionRefunds(id)) throw StateError('refund_original_locked');
     if (changeTracker != null) {
       final tx = await _transactionRepo.getTransactionById(id);
       if (tx?.syncId != null) {
@@ -560,6 +591,30 @@ class LocalRepository extends BaseRepository {
   @override
   Future<Transaction?> getTransactionById(int id) =>
       _transactionRepo.getTransactionById(id);
+
+  /// Versioned link in the existing sync key; no names/notes matching or new
+  /// server payload fields. Real deployments still need integration validation.
+  Future<List<Transaction>> getRefundTransactions(String originalSyncId, {required int ledgerId}) async {
+    final parent = base64Url.encode(utf8.encode(originalSyncId)).replaceAll('=', '');
+    // String range comparisons use bound SQL: Drift's ordered Dart expression
+    // helpers are for numeric/date columns, not Text columns.
+    final result = await db.customSelect(
+      'SELECT * FROM transactions WHERE ledger_id = ?1 '
+      'AND sync_id >= ?2 AND sync_id < ?3 ORDER BY id',
+      variables: [d.Variable<int>(ledgerId),
+        d.Variable<String>('${RefundIdentity.prefix}$parent:'),
+        d.Variable<String>('${RefundIdentity.prefix}$parent;')],
+      readsFrom: {db.transactions}).get();
+    final rows = result.map((row) => db.transactions.map(row.data));
+    return rows.where((t) => t.syncId!.startsWith('${RefundIdentity.prefix}$parent:') &&
+        RefundIdentity.parse(t.syncId)?.originalSyncId == originalSyncId).toList();
+  }
+
+  Future<bool> hasTransactionRefunds(int id) async {
+    final tx = await getTransactionById(id);
+    if (tx == null || tx.syncId == null) return false;
+    return (await getRefundTransactions(tx.syncId!, ledgerId: tx.ledgerId)).isNotEmpty;
+  }
 
   // ---------------------------------------------------------------------
   // v30 交易级多币种:折算兜底 + 重算/检测(.docs/multi-currency-ledger)
@@ -972,7 +1027,11 @@ class LocalRepository extends BaseRepository {
     String? toAccountSyncIdOverride,
     bool writeAccountSyncIdOverride = false,
     bool writeToAccountSyncIdOverride = false,
-  }) async {
+  }) => db.transaction(() async {
+    final current = await _transactionRepo.getTransactionById(id);
+    if (RefundIdentity.isRefund(current?.syncId) || await hasTransactionRefunds(id)) {
+      throw StateError('refund_original_locked');
+    }
     await _transactionRepo.updateTransactionFields(
       id: id,
       accountId: accountId,
@@ -996,7 +1055,7 @@ class LocalRepository extends BaseRepository {
         );
       }
     }
-  }
+  });
 
   @override
   Future<Transaction?> getFirstTransactionByLedger(int ledgerId) =>
@@ -1012,7 +1071,11 @@ class LocalRepository extends BaseRepository {
 
   @override
   Future<void> updateTransactionLedger(
-      {required int id, required int ledgerId}) async {
+      {required int id, required int ledgerId}) => db.transaction(() async {
+    final current = await _transactionRepo.getTransactionById(id);
+    if (RefundIdentity.isRefund(current?.syncId) || await hasTransactionRefunds(id)) {
+      throw StateError('refund_original_locked');
+    }
     await _transactionRepo.updateTransactionLedger(id: id, ledgerId: ledgerId);
     // v30:nativeAmount 是按【原账本】本位币折算的快照,跨账本移动后必须按
     // 新账本本位币重算;缺汇率退化 =amount(L11 可捞),绝不保留旧口径错值
@@ -1049,7 +1112,7 @@ class LocalRepository extends BaseRepository {
         action: 'update',
       );
     }
-  }
+  });
 
   /// v30:该账本交易涉及的全部外币币种(≠本位币,含 NULL 列按账户币种兜底后
   /// 的判定)。补折算/改本位币重算前把它们并入汇率拉取(extraQuotes),否则
@@ -1164,28 +1227,80 @@ class LocalRepository extends BaseRepository {
     int? toAccountId,
     required DateTime happenedAt,
     String? note,
-  }) =>
-      _transactionRepo.updateTransactionBySyncId(
-        syncId: syncId,
-        type: type,
-        amount: amount,
-        categoryId: categoryId,
-        accountId: accountId,
-        toAccountId: toAccountId,
-        happenedAt: happenedAt,
-        note: note,
-      );
+  }) => db.transaction(() async {
+    await _checkRefundUpdate(syncId: syncId, type: type, amount: amount,
+      accountId: accountId, toAccountId: toAccountId, happenedAt: happenedAt);
+    await _transactionRepo.updateTransactionBySyncId(syncId: syncId,
+      type: type, amount: amount, categoryId: categoryId, accountId: accountId,
+      toAccountId: toAccountId, happenedAt: happenedAt, note: note);
+  });
+
+  /// Fetch only the indexed refund namespace once for bulk operations. Do not
+  /// reintroduce thousands of per-transaction SELECTs into snapshot imports.
+  Future<List<({int ledgerId, String original, String refund})>> _refundLinks() async {
+    final result = await db.customSelect(
+      'SELECT ledger_id, sync_id FROM transactions WHERE sync_id >= ?1 AND sync_id < ?2',
+      variables: [d.Variable<String>(RefundIdentity.prefix),
+        d.Variable<String>('beecount-refund-v1;')],
+      readsFrom: {db.transactions}).get();
+    final links = <({int ledgerId, String original, String refund})>[];
+    for (final row in result) {
+      final key = row.read<String>('sync_id');
+      final link = RefundIdentity.parse(key);
+      if (link != null) links.add((ledgerId: row.read<int>('ledger_id'),
+        original: link.originalSyncId, refund: key));
+    }
+    return links;
+  }
+
+  Future<void> _checkRefundUpdate({required String syncId, required String type,
+    required double amount, required int? accountId, required int? toAccountId,
+    required DateTime happenedAt}) => _checkRefundUpdates([
+      TransactionUpdateBySyncIdData(syncId: syncId, type: type, amount: amount,
+        accountId: accountId, toAccountId: toAccountId, happenedAt: happenedAt)]);
+
+  Future<void> _checkRefundUpdates(List<TransactionUpdateBySyncIdData> updates) async {
+    final links = await _refundLinks();
+    if (links.isEmpty) return;
+    final protected = {for (final link in links) (link.ledgerId, link.original)};
+    final keys = {for (final link in links) link.original, for (final link in links) link.refund};
+    final relevant = updates.where((u) => keys.contains(u.syncId)).toList();
+    for (var offset = 0; offset < relevant.length; offset += 400) {
+      final end = offset + 400 < relevant.length ? offset + 400 : relevant.length;
+      final batch = relevant.sublist(offset, end);
+      final rows = await (db.select(db.transactions)
+            ..where((t) => t.syncId.isIn(batch.map((u) => u.syncId)))).get();
+      final byId = <String, List<Transaction>>{};
+      for (final current in rows) {
+        byId.putIfAbsent(current.syncId!, () => []).add(current);
+      }
+      for (final next in batch) {
+        for (final current in byId[next.syncId] ?? <Transaction>[]) {
+          if (!RefundIdentity.isRefund(current.syncId) &&
+              !protected.contains((current.ledgerId, current.syncId!))) continue;
+          if (next.type != current.type || next.amount != current.amount ||
+              next.accountId != current.accountId || next.toAccountId != current.toAccountId ||
+              next.happenedAt != current.happenedAt) {
+            throw StateError('refund_original_locked');
+          }
+        }
+      }
+    }
+  }
 
   @override
-  Future<void> deleteTransactionBySyncId(String syncId) =>
-      _transactionRepo.deleteTransactionBySyncId(syncId);
+  Future<void> deleteTransactionBySyncId(String syncId) => db.transaction(() async {
+    final current = await getTransactionBySyncId(syncId);
+    if (current != null) await deleteTransaction(current.id);
+  });
 
   @override
   Future<Map<String, int>> updateTransactionsBatchBySyncId(
     List<TransactionUpdateBySyncIdData> updates, {
     bool recordChanges = true,
-  }) async {
+  }) => db.transaction(() async {
     if (updates.isEmpty) return const {};
+    await _checkRefundUpdates(updates);
     if (!recordChanges || changeTracker == null) {
       return _transactionRepo.updateTransactionsBatchBySyncId(updates);
     }
@@ -1214,14 +1329,19 @@ class LocalRepository extends BaseRepository {
       });
       return syncIdToTxId;
     });
-  }
+  });
 
   @override
   Future<int> deleteTransactionsBatchBySyncIds(
     List<String> syncIds, {
     bool recordChanges = true,
-  }) async {
+  }) => db.transaction(() async {
     if (syncIds.isEmpty) return 0;
+    final selected = syncIds.toSet();
+    final links = await _refundLinks();
+    if (links.any((link) => selected.contains(link.original) && !selected.contains(link.refund))) {
+      throw StateError('refund_original_locked');
+    }
     // recordChanges=false / 无 changeTracker → 直接走子仓库,不写 change log
     if (!recordChanges || changeTracker == null) {
       return _transactionRepo.deleteTransactionsBatchBySyncIds(syncIds);
@@ -1253,7 +1373,7 @@ class LocalRepository extends BaseRepository {
       });
       return deleted;
     });
-  }
+  });
 
   // ============================================
   // CategoryRepository 接口实现 - 委托给 LocalCategoryRepository

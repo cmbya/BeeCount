@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../models/refund_identity.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/db.dart';
 import '../pages/transaction/transaction_editor_page.dart';
@@ -42,6 +43,12 @@ class TransactionEditUtils {
     final source = await repo.getTransactionById(transaction.id);
     transaction = source ?? transaction;
     final ledger = await repo.getLedgerById(transaction.ledgerId);
+    if (!context.mounted) return;
+    if (RefundIdentity.isRefund(transaction.syncId) ||
+        (!asCopy && repo is LocalRepository && await repo.hasTransactionRefunds(transaction.id))) {
+      if (context.mounted) showToast(context, AppLocalizations.of(context).refundLockHint);
+      return;
+    }
     if (!context.mounted) return;
     if (!asCopy && (source == null || ledger == null ||
         (ledger.isShared && !const {'owner', 'editor'}.contains(ledger.myRole)))) {

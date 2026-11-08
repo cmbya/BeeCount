@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../../data/db.dart';
+import '../../models/refund_identity.dart';
 
 /// 实体序列化工具
 /// 将本地 Drift 实体转为 JSON payload（用于 sync push）
@@ -32,21 +33,22 @@ class EntitySerializer {
     // ledgerSyncId 是跨设备关键：change log 外层的 ledger_id 是推送方的本地
     // int id，对端设备可能匹配不上；payload 里带上 ledger 的 syncId，对端
     // apply 时能先按 syncId 找到本地账本，再用 int id 兜底。
+    final refund = RefundIdentity.isRefund(tx.syncId);
     return {
       'syncId': tx.syncId,
-      'type': tx.type,
+      'type': refund ? 'income' : tx.type,
       'amount': tx.amount,
       'happenedAt': tx.happenedAt.toUtc().toIso8601String(),
       'note': tx.note,
       // 账单标记(D2 两个独立 bool)。camelCase 键与 server 端
       // _LEDGER_MERGE_SPECS / projection upsert 对齐 —— 改键名会让标记跨设备静默丢失。
-      'excludeFromStats': tx.excludeFromStats,
-      'excludeFromBudget': tx.excludeFromBudget,
+      'excludeFromStats': refund || tx.excludeFromStats,
+      'excludeFromBudget': refund || tx.excludeFromBudget,
       // v30 交易级多币种:原币种 + 折账本本位币快照(与 server 0018 两列对齐)。
       // 有值才发:NULL 发出去会被 server merge 视为"不更新"(None 被过滤),
       // 语义等价;省略保持 payload 干净。
       if (tx.currencyCode != null) 'currencyCode': tx.currencyCode,
-      if (tx.nativeAmount != null) 'nativeAmount': tx.nativeAmount,
+      if (tx.nativeAmount != null || refund) 'nativeAmount': tx.nativeAmount,
       if (ledgerSyncId != null && ledgerSyncId.isNotEmpty)
         'ledgerSyncId': ledgerSyncId,
       'categoryName': categoryName,

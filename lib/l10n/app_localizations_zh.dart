@@ -7,6 +7,45 @@ import 'app_localizations.dart';
 /// The translations for Chinese (`zh`).
 class AppLocalizationsZh extends AppLocalizations {
   @override
+  String get refundAccount => "入账账户";
+  @override
+  String get refundAccountAndDate => "账户与日期";
+  @override
+  String get refundAccountMissing => "原支出账户不可用，请恢复或修正原账户后再退款。";
+  @override
+  String get refundActualAmount => "实际到账";
+  @override
+  String get refundAdd => "新增退款";
+  @override
+  String get refundAmount => "退款金额";
+  @override
+  String get refundDate => "实际入账日期";
+  @override
+  String get refundDifferentAmount => "实际金额与账单金额不同";
+  @override
+  String get refundExceeds => "退款金额必须大于零，且不能超过剩余可退金额。";
+  @override
+  String get refundHistory => "退款记录";
+  @override
+  String get refundInherited => "日期和账户沿用原支出。保留原支出，退款只给原账户加回一次，不抵扣预算。";
+  @override
+  String get refundLockHint => "退款记录不能作为普通账单编辑或复制。修改原账单金额、日期、币种、账户、移动或删除原账单前，请先删除关联退款。";
+  @override
+  String get refundMaximum => "最多";
+  @override
+  String get refundOriginal => "原账单";
+  @override
+  String get refundOriginalMissing => "找不到关联的原账单。";
+  @override
+  String get refundRecord => "退款记录";
+  @override
+  String get refundSaveFailed => "退款未保存，请检查权限、账户和金额后重试。";
+  @override
+  String get refundStale => "原账单或剩余可退金额已变化，请重新打开退款页面。";
+  @override
+  String get refundTitle => "退款";
+
+  @override
   String get homeRemainingBudget => "剩余月预算";
   @override
   String get homeDailyRemaining => "剩余日均";
@@ -8706,6 +8745,45 @@ class AppLocalizationsZh extends AppLocalizations {
 
 /// The translations for Chinese, as used in Taiwan (`zh_TW`).
 class AppLocalizationsZhTw extends AppLocalizationsZh {
+  @override
+  String get refundAccount => "入帳帳戶";
+  @override
+  String get refundAccountAndDate => "帳戶與日期";
+  @override
+  String get refundAccountMissing => "原支出帳戶無法使用，請恢復或修正原帳戶後再退款。";
+  @override
+  String get refundActualAmount => "實際到帳";
+  @override
+  String get refundAdd => "新增退款";
+  @override
+  String get refundAmount => "退款金額";
+  @override
+  String get refundDate => "實際入帳日期";
+  @override
+  String get refundDifferentAmount => "實際金額與帳單金額不同";
+  @override
+  String get refundExceeds => "退款金額必須大於零，且不能超過剩餘可退金額。";
+  @override
+  String get refundHistory => "退款記錄";
+  @override
+  String get refundInherited => "日期和帳戶沿用原支出。保留原支出，退款只加回原帳戶一次，不抵扣預算。";
+  @override
+  String get refundLockHint => "退款記錄不能當作一般帳單編輯或複製。修改原帳單金額、日期、幣別、帳戶、移動或刪除原帳單前，請先刪除關聯退款。";
+  @override
+  String get refundMaximum => "最多";
+  @override
+  String get refundOriginal => "原帳單";
+  @override
+  String get refundOriginalMissing => "找不到關聯的原帳單。";
+  @override
+  String get refundRecord => "退款記錄";
+  @override
+  String get refundSaveFailed => "退款未儲存，請檢查權限、帳戶與金額後重試。";
+  @override
+  String get refundStale => "原帳單或剩餘可退金額已變更，請重新開啟退款頁面。";
+  @override
+  String get refundTitle => "退款";
+
   @override
   String get homeRemainingBudget => "剩餘月預算";
   @override
