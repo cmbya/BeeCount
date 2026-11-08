@@ -38,7 +38,9 @@ void main() {
       };
       await expectLater(remove(), throwsA(isA<StateError>().having((e) => e.message, 'message', 'read_only')));
       expect(await repo.getTransactionById(id), isNotNull);
-      expect(await repo.getAccountBalance(account), 90);
+      // Joined shared ledgers never alter the member's personal net worth.
+      expect(await repo.getAccountBalance(account), 100);
+      expect(await repo.getAccountBalanceInLedger(account, ledger), -10);
       expect(await db.select(db.localChanges).get(), isEmpty);
     });
   }

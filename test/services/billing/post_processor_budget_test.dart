@@ -58,9 +58,10 @@ void main() {
   });
 
   test('Ref post-processing refreshes the budget', () async {
-    final provider = Provider<Future<void>>((ref) =>
-        PostProcessor.runR(ref, ledgerId: ledger));
-    await c.read(provider);
+    final provider = Provider<Future<void> Function()>((ref) =>
+        () => PostProcessor.runR(ref, ledgerId: ledger));
+    // Invoke after provider initialization, as a real event handler does.
+    await c.read(provider)();
     expect(c.read(budgetRefreshProvider), 1);
   });
 
@@ -82,5 +83,6 @@ void main() {
     PostProcessor.runAfterDownload(widgetRef);
     expect(c.read(budgetRefreshProvider), 2);
     await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 3));
   });
 }

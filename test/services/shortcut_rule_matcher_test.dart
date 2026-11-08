@@ -24,7 +24,7 @@ void main() {
     expect(matches('shopXYZ', 'shop.*|[奶茶]'), false);
     expect(matches('门店shop.*', 'shop.*|[奶茶]'), true);
     expect(matches('支付[奶茶]', 'shop.*|[奶茶]'), true);
-    expect(matches('aaaaa', '(a+)+$|^.*$'), false);
+    expect(matches('aaaaa', r'(a+)+$|^.*$'), false);
   });
 
   test('legacy contains and exact preserve pipes and whitespace as literal text', () {

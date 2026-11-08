@@ -284,7 +284,8 @@ class LocalTransactionRepository implements TransactionRepository {
       kind: s.kind,
       icon: s.icon,
       sortOrder: s.sortOrder,
-      parentId: null,
+      parentId: (s.parentSyncId?.isNotEmpty ?? false)
+          ? syntheticIdForSyncId(s.parentSyncId!) : null,
       level: s.level,
       iconType: s.iconType,
       customIconPath: s.iconType == 'custom' && s.iconCloudSha256 != null
@@ -1280,22 +1281,7 @@ class LocalTransactionRepository implements TransactionRepository {
         if (cov != null && cov.isNotEmpty) {
           final s = sharedCatBySyncId[cov];
           if (s != null) {
-            category = Category(
-              id: syntheticIdForSyncId(s.syncId),
-              name: s.name,
-              kind: s.kind,
-              icon: s.icon,
-              sortOrder: s.sortOrder,
-              parentId: null,
-              level: s.level,
-              iconType: s.iconType,
-              customIconPath:
-                  s.iconType == 'custom' && s.iconCloudSha256 != null
-                      ? 'custom_icons/shared_${s.iconCloudSha256}.png'
-                      : null,
-              communityIconId: null,
-              syncId: s.syncId,
-            );
+            category = _syntheticCategoryFromShared(s);
           }
         }
       }

@@ -294,7 +294,8 @@ class _TransactionDetailPageState extends ConsumerState<TransactionDetailPage> {
     final repo = ref.read(repositoryProvider);
     final source = repo is LocalRepository
         ? await (repo.db.select(repo.db.transactions)..where((t) =>
-            t.syncId.equals(identity.originalSyncId) & t.ledgerId.equals(_data!.tx.ledgerId)))
+            t.syncId.equals(identity.originalSyncId))
+          ..where((t) => t.ledgerId.equals(_data!.tx.ledgerId)))
             .getSingleOrNull()
         : await repo.getTransactionBySyncId(identity.originalSyncId);
     if (!mounted) return;
