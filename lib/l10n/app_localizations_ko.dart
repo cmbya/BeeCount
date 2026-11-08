@@ -7,6 +7,13 @@ import 'app_localizations.dart';
 /// The translations for Korean (`ko`).
 class AppLocalizationsKo extends AppLocalizations {
   @override
+  String get homeRemainingBudget => "남은 월 예산";
+  @override
+  String get homeDailyRemaining => "하루 사용 가능";
+  @override
+  String get homeSummaryUnavailable => "통계를 불러올 수 없습니다 · 재시도";
+
+  @override
   String get transactionAttachmentsPartial => "거래는 저장되었지만 일부 첨부 파일을 저장하지 못했습니다. 거래 상세에서 첨부 파일만 다시 추가하세요. 거래를 다시 저장하지 마세요.";
   @override
   String get transactionDetailImagesFailed => "이미지를 저장하지 못했습니다. 저장 공간과 이미지를 확인한 후 다시 시도하세요.";

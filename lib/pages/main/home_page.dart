@@ -23,7 +23,7 @@ import '../../services/export/share_poster_service.dart';
 import '../report/annual_report_page.dart';
 import '../calendar/calendar_page.dart';
 import '../../widgets/biz/ledger_picker_sheet.dart';
-import '../../widgets/biz/home_budget_summary.dart';
+import '../../widgets/biz/home_monthly_summary.dart';
 import '../../widgets/ai/agent_entry_card.dart';
 import 'ledgers_page_new.dart';
 import '../../providers/shared_ledger_providers.dart';
@@ -989,19 +989,11 @@ class _HomePageState extends ConsumerState<HomePage> {
                           ],
                         ),
                       ),
-                      Container(
-                        margin: const EdgeInsets.symmetric(horizontal: 12),
-                        width: 1,
-                        height: 36,
-                        color: Theme.of(context).dividerTheme.color ??
-                            Theme.of(context).dividerColor, // ⭐ 自适应分割线颜色
-                      ),
-                      const Expanded(child: _HeaderCenterSummary()),
                     ],
                   ),
                 ],
               ),
-              bottom: const HomeBudgetSummary(),
+              bottom: const HomeMonthlySummary(),
             );
           }),
           const SizedBox(height: 0),
@@ -1087,60 +1079,3 @@ class _HomePageState extends ConsumerState<HomePage> {
   }
 }
 
-class _HeaderCenterSummary extends ConsumerWidget {
-  const _HeaderCenterSummary();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final ledgerId = ref.watch(currentLedgerIdProvider);
-    final month = ref.watch(selectedMonthProvider);
-    final params = (ledgerId: ledgerId, month: month);
-
-    ref.watch(monthlyTotalsProvider(params));
-    final cachedTotals = ref.watch(lastMonthlyTotalsProvider(params));
-    final (income, expense) = cachedTotals ?? (0.0, 0.0);
-    final balance = income - expense;
-
-    final amountStyle = Theme.of(context).textTheme.titleMedium?.copyWith(
-              color: Theme.of(context).textTheme.bodyLarge?.color,
-              fontSize: 16,
-              fontWeight: FontWeight.w600,
-            ) ??
-        TextStyle(
-          fontSize: 16,
-          fontWeight: FontWeight.w600,
-          color: Theme.of(context).textTheme.bodyLarge?.color,
-        );
-
-    Widget item(String title, double value) => Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title,
-                textAlign: TextAlign.left, style: BeeTextTokens.label(context)),
-            const SizedBox(height: 2),
-            FittedBox(
-              fit: BoxFit.scaleDown,
-              alignment: Alignment.centerLeft,
-              child: AmountText(
-                value: value,
-                signed: false,
-                decimals: 2,
-                style: amountStyle,
-              ),
-            ),
-          ],
-        );
-    return Row(
-      children: [
-        Expanded(child: item(AppLocalizations.of(context).homeIncome, income)),
-        const SizedBox(width: 4),
-        Expanded(
-            child: item(AppLocalizations.of(context).homeExpense, expense)),
-        const SizedBox(width: 4),
-        Expanded(
-            child: item(AppLocalizations.of(context).homeBalance, balance)),
-      ],
-    );
-  }
-}

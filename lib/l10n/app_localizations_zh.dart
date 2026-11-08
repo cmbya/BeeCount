@@ -7,6 +7,13 @@ import 'app_localizations.dart';
 /// The translations for Chinese (`zh`).
 class AppLocalizationsZh extends AppLocalizations {
   @override
+  String get homeRemainingBudget => "剩余月预算";
+  @override
+  String get homeDailyRemaining => "剩余日均";
+  @override
+  String get homeSummaryUnavailable => "统计加载失败，点击重试";
+
+  @override
   String get transactionAttachmentsPartial => "账单已保存，但部分附件保存失败。请在账单详情中补添附件，不要重复记账。";
   @override
   String get transactionDetailImagesFailed => "图片未保存成功，请检查存储空间和图片后重试。";
@@ -8699,6 +8706,13 @@ class AppLocalizationsZh extends AppLocalizations {
 
 /// The translations for Chinese, as used in Taiwan (`zh_TW`).
 class AppLocalizationsZhTw extends AppLocalizationsZh {
+  @override
+  String get homeRemainingBudget => "剩餘月預算";
+  @override
+  String get homeDailyRemaining => "剩餘日均";
+  @override
+  String get homeSummaryUnavailable => "統計載入失敗，點擊重試";
+
   @override
   String get transactionAttachmentsPartial => "帳單已儲存，但部分附件儲存失敗。請在帳單詳情中補加附件，不要重複記帳。";
   @override

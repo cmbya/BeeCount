@@ -1,4 +1,7 @@
 {
+  "homeRemainingBudget": "남은 월 예산",
+  "homeDailyRemaining": "하루 사용 가능",
+  "homeSummaryUnavailable": "통계를 불러올 수 없습니다 · 재시도",
   "transactionAttachmentsPartial": "거래는 저장되었지만 일부 첨부 파일을 저장하지 못했습니다. 거래 상세에서 첨부 파일만 다시 추가하세요. 거래를 다시 저장하지 마세요.",
   "@@locale": "ko",
   "aiConsentTitle": "AI 기능을 켜기 전에",

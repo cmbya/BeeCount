@@ -1,4 +1,7 @@
 {
+  "homeRemainingBudget": "Remaining monthly budget",
+  "homeDailyRemaining": "Daily available",
+  "homeSummaryUnavailable": "Summary unavailable · Retry",
   "@@locale": "en",
   "agentActivityPreparing": "Preparing your answer…",
   "agentActivityAwaitingModel": "Waiting for the model…",

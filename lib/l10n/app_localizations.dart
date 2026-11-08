@@ -860,6 +860,11 @@ abstract class AppLocalizations {
   /// **'Balance'**
   String get homeBalance;
 
+  String get homeRemainingBudget;
+  String get homeDailyRemaining;
+  String get homeSummaryUnavailable;
+
+
   /// No description provided for @homeNoRecords.
   ///
   /// In en, this message translates to:
