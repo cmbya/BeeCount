@@ -1647,7 +1647,7 @@ class RunnerTests: XCTestCase {
       let base64 = try XCTUnwrap(payload["dataBase64"] as? String)
       XCTAssertNotNil(Data(base64Encoded: base64))
       XCTAssertEqual((submission["entries"] as? [[String: Any]])?.count, 1)
-      return try ConfirmedBilling.encode(["status": "committed", "requestId": submission["requestId"]!])
+      return try ConfirmedBilling.encode(["status": "committed", "requestId": submission["requestId"]!, "attachmentCount": 1])
     })
     XCTAssertEqual(commits, 1)
   }
@@ -1998,7 +1998,7 @@ class RunnerTests: XCTestCase {
       payloads.append(try ConfirmedBilling.encode(submission))
       let attachment = submission["attachment"] as! [String: Any]
       XCTAssertEqual(Data(base64Encoded: attachment["dataBase64"] as! String), data)
-      return try ConfirmedBilling.encode(["status": "committed", "requestId": submission["requestId"]!])
+      return try ConfirmedBilling.encode(["status": "committed", "requestId": submission["requestId"]!, "attachmentCount": 1])
     }
     _ = try await VariableBillingFlow.save(result, call: call, commit: commit)
     UserDefaults.standard.set(false, forKey: key)
@@ -2007,4 +2007,96 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual(payloads.first, payloads.last)
   }
 
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariablePaymentScreenshotIsSnapshotNotAIAndLostHandoffStopsSave() async throws {
+    let bytes = try screenshot(width: 8, height: 8)
+    let image = IntentFile(data: bytes, filename: "payment.png", type: .png)
+    let prepared = try await variableBill()
+    let draft = VariableBillingDraft(payload: prepared.payload, screenshot: image)
+    var operations: [String] = []
+    let confirmed = try await VariableBillingFlow.confirm(draft, choose: { _, prompt in
+      XCTAssertTrue(prompt.contains("仅保存到账单详情图片"))
+      return "确认提交"
+    }, readAmount: { _, _ in XCTFail(); return "" }, readNote: { _ in XCTFail(); return "" },
+       readDate: { _ in XCTFail(); return Date() }, call: { request in
+      operations.append(request["operation"] as? String ?? "")
+      XCTAssertNotEqual(request["operation"] as? String, "recognize")
+      XCTAssertNil(request["imagePath"])
+      return request["operation"] as? String == "validate" ? ["status": "valid"] : self.variableOptions()
+    })
+    let envelope = try ConfirmedBilling.decode(confirmed.payload)
+    XCTAssertEqual(envelope["paymentScreenshotCount"] as? Int, 1)
+    XCTAssertEqual(envelope["paymentScreenshotSHA256"] as? String, VariableBillingAttachment.digest(bytes))
+    XCTAssertEqual(confirmed.screenshot?.data, bytes)
+    XCTAssertFalse(confirmed.payload.contains("dataBase64"))
+    XCTAssertFalse(operations.contains("recognize"))
+    let lost = ConfirmedVariableBilling(status: confirmed.status, payload: confirmed.payload, screenshot: nil)
+    var commits = 0
+    do {
+      _ = try await VariableBillingFlow.save(lost, call: { _ in self.variableOptions() }, commit: { _, _ in commits += 1; return "" })
+      XCTFail("Lost screenshot must not silently save an image-free bill")
+    } catch { XCTAssertTrue(error.localizedDescription.contains("丢失")) }
+    XCTAssertEqual(commits, 0)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariablePaymentScreenshotDigestRejectsChangedImage() throws {
+    let first = try screenshot(width: 8, height: 8)
+    let changed = try screenshot(width: 9, height: 9)
+    let result = ConfirmedVariableBilling(status: "confirmed", payload: "", screenshot: IntentFile(data: changed, filename: "changed.png", type: .png))
+    XCTAssertThrowsError(try VariableBillingAttachment.verify(result, envelope: [
+      "paymentScreenshotCount": 1, "paymentScreenshotSHA256": VariableBillingAttachment.digest(first)]))
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariablePaymentScreenshotSnapshotOutlivesInputFile() throws {
+    let source = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
+    let bytes = try screenshot(width: 8, height: 8)
+    try bytes.write(to: source)
+    defer { try? FileManager.default.removeItem(at: source) }
+    let original = IntentFile(fileURL: source)
+    let snapshot = try VariableBillingAttachment.freeze(original)
+    try FileManager.default.removeItem(at: source)
+    XCTAssertEqual(snapshot.count, 1)
+    XCTAssertEqual(snapshot.file?.data, bytes)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariablePaymentScreenshotCancelCreatesNoConfirmationOrPayload() async throws {
+    let prepared = try await variableBill()
+    let draft = VariableBillingDraft(payload: prepared.payload,
+      screenshot: IntentFile(data: Data([1, 2, 3]), filename: "unused.png", type: .png))
+    let result = try await VariableBillingFlow.confirm(draft, choose: { _, _ in "取消提交" },
+      readAmount: { _, _ in XCTFail(); return "" }, readNote: { _ in XCTFail(); return "" },
+      readDate: { _ in XCTFail(); return Date() }, call: { _ in self.variableOptions() })
+    XCTAssertEqual(result.status, "cancelled"); XCTAssertNil(result.screenshot); XCTAssertTrue(result.payload.isEmpty)
+  }
+
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariableImageReceiptMissingCountWarnsWithoutRepeatingCommit() async throws {
+    let prepared = try await variableBill()
+    let draft = VariableBillingDraft(payload: prepared.payload,
+      screenshot: IntentFile(data: try screenshot(width: 8, height: 8), filename: "payment.png", type: .png))
+    let confirmed = try await VariableBillingFlow.confirm(draft, choose: { _, _ in "确认提交" },
+      readAmount: { _, _ in "" }, readNote: { _ in "" }, readDate: { _ in Date() }, call: { request in
+        request["operation"] as? String == "validate" ? ["status": "valid"] : self.variableOptions()
+      })
+    var commits = 0
+    do {
+      _ = try await VariableBillingFlow.save(confirmed, call: { request in
+        request["operation"] as? String == "validate" ? ["status": "valid"] : self.variableOptions()
+      }, commit: { submission, _ in
+        commits += 1
+        return try ConfirmedBilling.encode(["status": "committed", "requestId": submission["requestId"]!])
+      })
+      XCTFail("A bill receipt without image evidence must not claim full success")
+    } catch { XCTAssertTrue(error.localizedDescription.contains("不要重新记账")) }
+    XCTAssertEqual(commits, 1)
+  }
 }

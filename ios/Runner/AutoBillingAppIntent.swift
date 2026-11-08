@@ -3,6 +3,7 @@ import UIKit
 import ImageIO
 import UniformTypeIdentifiers
 import Vision
+import CryptoKit
 
 // 使用条件编译，只在iOS 16+编译AppIntents代码
 #if canImport(AppIntents)
@@ -1220,7 +1221,7 @@ struct VariableBillingDraft: TransientAppEntity {
 struct PrepareVariableBillingIntent: AppIntent {
     static var isDiscoverable = true
     static var title: LocalizedStringResource = "接收并确认账单"
-    static var description: LocalizedStringResource = "接收变量后直接显示确认菜单；金额和备注点击输入，其他字段仍从 App 选择。提交只输出确认结果，下一步保存账单才入账。"
+    static var description: LocalizedStringResource = "接收变量后直接显示确认菜单。支付截屏仅保存到账单详情的图片附件，不用于 AI 或分类识别。提交输出整份确认结果，下一步保存账单才入账。"
     static var openAppWhenRun = false
     @Parameter(title: "金额", inputConnectionBehavior: .never) var amount: String?
     @Parameter(title: "类型", inputConnectionBehavior: .never) var type: String?
@@ -1284,6 +1285,65 @@ struct PrepareVariableBillingIntent: AppIntent {
     }
 }
 
+/// Snapshot the selected screenshot into the transient result after confirmation.
+/// It is a bill attachment only: no OCR, recognition request or permanent file.
+@available(iOS 16.0, *)
+@MainActor
+enum VariableBillingAttachment {
+    struct Snapshot {
+        let file: IntentFile?
+        let count: Int
+        let digest: String?
+    }
+    static func digest(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+    static func bytes(_ screenshot: IntentFile) throws -> Data {
+        let raw: Data
+        if let url = screenshot.fileURL {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url), !data.isEmpty, data.count <= 40_000_000 else {
+                throw ShortcutBillingError(message: "无法读取支付截图或超过40 MB，未入账")
+            }
+            raw = data
+        } else {
+            raw = try ConfirmedBilling.imageData(screenshot)
+        }
+        return raw.withUnsafeBytes { buffer in Data(bytes: buffer.baseAddress!, count: buffer.count) }
+    }
+    static func freeze(_ screenshot: IntentFile?) throws -> Snapshot {
+        guard let screenshot else { return Snapshot(file: nil, count: 0, digest: nil) }
+        let bytes = try self.bytes(screenshot)
+        guard let source = CGImageSourceCreateWithData(bytes as CFData, nil),
+              CGImageSourceGetCount(source) > 0,
+              let identifier = CGImageSourceGetType(source) as String?,
+              let type = UTType(identifier), type.conforms(to: .image) else {
+            throw ShortcutBillingError(message: "支付截屏不是有效图片，未生成确认结果")
+        }
+        let ext = type.preferredFilenameExtension ?? "jpg"
+        // Detached bytes survive expiration of the original Shortcut file URL.
+        let file = IntentFile(data: bytes, filename: "payment-screenshot." + ext, type: type)
+        return Snapshot(file: file, count: 1, digest: digest(bytes))
+    }
+    static func verify(_ result: ConfirmedVariableBilling, envelope: [String: Any]) throws -> Int {
+        // Legacy confirmed results used the keep-original flag as the only hint.
+        let expected = envelope["paymentScreenshotCount"] as? Int ??
+            ((envelope["attachmentKeepOriginal"] is Bool || result.screenshot != nil) ? 1 : 0)
+        guard (0...1).contains(expected), (result.screenshot != nil) == (expected == 1),
+              envelope["paymentScreenshotCount"] == nil || expected == 0 || envelope["paymentScreenshotSHA256"] is String else {
+            throw ShortcutBillingError(message: "支付截屏在动作交接时丢失，未入账。请连接整份账单确认结果。")
+        }
+        if let savedDigest = envelope["paymentScreenshotSHA256"] as? String {
+            guard let screenshot = result.screenshot,
+                  digest(try bytes(screenshot)) == savedDigest else {
+                throw ShortcutBillingError(message: "支付截屏已变化，未入账，请重新核对原截图。")
+            }
+        }
+        return expected
+    }
+}
+
 /// Only the first action's explicit confirmation creates a savable result.
 /// A cancellation has no submission or screenshot and makes the save action a no-op.
 @available(iOS 16.0, *)
@@ -1305,7 +1365,7 @@ struct ConfirmedVariableBilling: TransientAppEntity {
 struct ConfirmVariableBillingIntent: AppIntent {
     static var isDiscoverable = true
     static var title: LocalizedStringResource = "保存账单"
-    static var description: LocalizedStringResource = "只接收上一动作已确认的最终账单并保存，不再显示编辑菜单。未确认或取消不保存，不调用 AI。"
+    static var description: LocalizedStringResource = "接收整份账单确认结果，将账单和支付截屏图片附件一并保存。不再编辑，不调用 AI；未确认、取消或截图交接丢失不入账。"
     static var openAppWhenRun = false
     @Parameter(title: "账单确认结果") var bill: ConfirmedVariableBilling
     static var parameterSummary: some ParameterSummary { Summary("保存账单 \(\.$bill)") }
@@ -1542,7 +1602,8 @@ enum VariableBillingFlow {
             if type == "expense" { fields.append("不计预算") }
             let labels = fields.map { $0 + "：" + (values[$0] ?? "") }
             let selected: String
-            do { selected = try await choose(labels + ["确认提交", "取消提交"], "确认账单（修改后返回此菜单）") }
+            let imageHint = bill.screenshot == nil ? "未附支付截图" : "支付截图：1张，仅保存到账单详情图片，不用于 AI"
+            do { selected = try await choose(labels + ["确认提交", "取消提交"], "确认账单（修改后返回此菜单）\n" + imageHint) }
             catch is CancellationError { return cancelled() }
             let action = labels.firstIndex(of: selected).map { fields[$0] } ?? selected
             do {
@@ -1627,10 +1688,15 @@ enum VariableBillingFlow {
                     if type == "transfer" { submission["toAccountId"] = state["toAccountId"] }
                     _ = try await call(["operation": "validate", "submission": submission])
                     try Task.checkCancellation()
-                    var envelope: [String: Any] = ["variableConfirmationVersion": 1, "submission": submission, "minorDigits": digits]
-                    if bill.screenshot != nil { envelope["attachmentKeepOriginal"] = UserDefaults.standard.bool(forKey: "flutter.attachmentKeepOriginal") }
+                    let image = try VariableBillingAttachment.freeze(bill.screenshot)
+                    var envelope: [String: Any] = ["variableConfirmationVersion": 1, "submission": submission, "minorDigits": digits,
+                        "paymentScreenshotCount": image.count]
+                    if let digest = image.digest {
+                        envelope["paymentScreenshotSHA256"] = digest
+                        envelope["attachmentKeepOriginal"] = UserDefaults.standard.bool(forKey: "flutter.attachmentKeepOriginal")
+                    }
                     let result = try ConfirmedBilling.encode(envelope)
-                    return ConfirmedVariableBilling(status: "confirmed", payload: result, screenshot: bill.screenshot)
+                    return ConfirmedVariableBilling(status: "confirmed", payload: result, screenshot: image.file)
                 default: throw ShortcutBillingError(message: "菜单选项已失效，请重新选择")
                 }
             } catch let failure as VariableBillingPrompt.Failure {
@@ -1672,6 +1738,7 @@ enum VariableBillingFlow {
         guard current["currency"] as? String == currency, current["minorDigits"] as? Int == digits else {
             throw ShortcutBillingError(message: "确认后账本币种或精度已变化，未保存；请重新核对原账单")
         }
+        let expectedAttachmentCount = try VariableBillingAttachment.verify(result, envelope: envelope)
         // Freeze the original-image preference at confirmation. Retrying this same
         // result must not generate a different payload when the App setting changes.
         if let screenshot = result.screenshot {
@@ -1708,7 +1775,11 @@ enum VariableBillingFlow {
               receiptID.caseInsensitiveCompare(requestID) == .orderedSame else {
             throw ShortcutBillingError(message: "尚未收到对应账单的保存凭证。请求 ID：" + requestID + "。请先在 App 核对，不要重复记账。")
         }
-        return Outcome(value: saved, message: "已在本机保存 1 条账单。云端同步请查看 App，无需重记。")
+        if expectedAttachmentCount > 0 && response["attachmentCount"] as? Int != expectedAttachmentCount {
+            throw ShortcutBillingError(message: "账单可能已保存，但图片保存凭证不完整。请在 App 账单详情的图片中核对，不要重新记账。请求 ID：" + requestID)
+        }
+        let imageMessage = expectedAttachmentCount == 0 ? "" : "支付截图已保存到账单详情的图片中。"
+        return Outcome(value: saved, message: "已在本机保存 1 条账单。" + imageMessage + "云端同步请查看 App，无需重记。")
     }
 
 }

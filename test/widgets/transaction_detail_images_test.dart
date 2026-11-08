@@ -58,4 +58,24 @@ void main() {
       await tester.pump(const Duration(seconds: 3));
     });
   }
+
+  testWidgets('saved shortcut screenshot is shown in bill detail images row', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final db = BeeDatabase.forTesting(NativeDatabase.memory()); final repo = LocalRepository(db);
+    final ledger = await repo.createLedger(name: '附件账本');
+    final id = await repo.addTransaction(ledgerId: ledger, type: 'expense', amount: 10, happenedAt: DateTime(2026, 11, 5));
+    await repo.createAttachment(transactionId: id, fileName: 'sha_picture.png', originalName: 'payment-screenshot.png');
+    final container = ProviderContainer(overrides: [databaseProvider.overrideWithValue(db),
+      repositoryProvider.overrideWithValue(repo), currentLedgerIdProvider.overrideWith((ref) => ledger)]);
+    addTearDown(() async { container.dispose(); await db.close(); });
+    await tester.pumpWidget(UncontrolledProviderScope(container: container, child: MaterialApp(
+      locale: const Locale('zh'), localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales, home: TransactionDetailPage(transactionId: id))));
+    await tester.runAsync(() async => Future<void>.delayed(const Duration(milliseconds: 150)));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('detail-images')));
+    expect(find.descendant(of: find.byKey(const Key('detail-images')), matching: find.text('1')), findsOneWidget);
+    expect((await repo.getAttachmentsByTransaction(id)).single.originalName, 'payment-screenshot.png');
+    await tester.pumpWidget(const SizedBox.shrink()); await tester.pump(const Duration(seconds: 3));
+  });
 }

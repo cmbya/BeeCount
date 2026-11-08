@@ -198,7 +198,7 @@ class ShortcutStore {
           // Repository also registers parent tx sync metadata in this transaction.
           for (final id in ids) {
             await repo.createAttachment(transactionId: id,
-                fileName: attachment.fileName, originalName: 'shortcut.${attachment.extension}',
+                fileName: attachment.fileName, originalName: 'payment-screenshot.${attachment.extension}',
                 fileSize: attachment.bytes.length, sortOrder: 0);
           }
         }

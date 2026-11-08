@@ -517,4 +517,42 @@ void main() {
     }
   });
 
+
+  test('single confirmed variable bill stores screenshot in its detail image relation exactly once', () async {
+    final directory = await Directory.systemTemp.createTemp('variable-bill-picture-');
+    final pictures = ShortcutStore(repo, attachmentDirectory: () async => directory);
+    try {
+      final data = payload();
+      data['entries'] = [data['entries'][1]];
+      data['originalAmountMinor'] = 15000;
+      data['attachment'] = {'dataBase64': base64Encode([137, 80, 78, 71, 13, 10, 26, 10]), 'extension': 'png'};
+      final request = ShortcutSubmission.fromJson(data);
+      final before = await repo.getAccountBalance(account);
+      final result = await pictures.commit(request);
+      expect(result['count'], 1); expect(result['attachmentCount'], 1);
+      final id = (result['transactionIds'] as List).single as int;
+      // TransactionDetailPage uses this exact repository method for its images row.
+      final images = await repo.getAttachmentsByTransaction(id);
+      expect(images.length, 1); expect(images.single.originalName, 'payment-screenshot.png');
+      expect(images.single.fileName, request.attachment!.fileName);
+      expect(File('${directory.path}/${images.single.fileName}').readAsBytesSync(), request.attachment!.bytes);
+      expect(await repo.getAccountBalance(account), before - 150);
+      expect((await pictures.commit(request))['replayed'], true);
+      expect((await repo.getAttachmentsByTransaction(id)).length, 1);
+      expect(await repo.getAccountBalance(account), before - 150);
+    } finally { await directory.delete(recursive: true); }
+  });
+
+  test('single screenshot bill rolls back all records if its image cannot be associated', () async {
+    final directory = await Directory.systemTemp.createTemp('single-picture-rollback-');
+    final pictures = ShortcutStore(repo, attachmentDirectory: () async => directory);
+    try {
+      final data = payload(); data['entries'] = [data['entries'][0]]; data['originalAmountMinor'] = 8000;
+      data['attachment'] = {'dataBase64': base64Encode([137, 80, 78, 71]), 'extension': 'png'};
+      await db.customStatement("CREATE TRIGGER reject_single_picture BEFORE INSERT ON transaction_attachments BEGIN SELECT RAISE(ABORT, 'test failure'); END");
+      await expectLater(pictures.commit(ShortcutSubmission.fromJson(data)), throwsA(failure('COMMIT_FAILED')));
+      expect(await count('transactions'), 0); expect(await count('transaction_attachments'), 0);
+      expect(await count('shortcut_receipts'), 0); expect(directory.listSync(), isEmpty);
+    } finally { await directory.delete(recursive: true); }
+  });
 }
