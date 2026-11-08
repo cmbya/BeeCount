@@ -3318,5 +3318,22 @@
   "refundRecord": "退款記錄",
   "refundSaveFailed": "退款未儲存，請檢查權限、帳戶與金額後重試。",
   "refundStale": "原帳單或剩餘可退金額已變更，請重新開啟退款頁面。",
-  "refundTitle": "退款"
+  "refundTitle": "退款",
+  "insightsWeek": "週",
+  "insightsSummary": "收支統計",
+  "insightsDailyExpense": "日均支出",
+  "insightsRefundIncome": "退款收入",
+  "insightsTransferSummary": "流轉統計",
+  "insightsTransferTotal": "轉帳金額",
+  "insightsExpenseChart": "支出統計圖",
+  "insightsIncomeChart": "收入統計圖",
+  "insightsBalanceChart": "結餘統計圖",
+  "insightsExpenseCategories": "支出分類詳情",
+  "insightsIncomeCategories": "收入分類詳情",
+  "insightsRefundHint": "退款與退款收入顯示同一筆實際退回金額，帳戶只入帳一次。原支出和預算用量保留。",
+  "insightsAverageHint": "日均按本週期已過去的日曆日計算，包含沒有記帳的日期。",
+  "insightsAssetsHint": "全部個人帳戶 · 主幣別，非僅目前帳本；缺匯率幣別不計入，估值帳戶使用目前估值。",
+  "insightsSelectedPeriod": "所選時間段",
+  "insightsBillSummary": "帳單彙總",
+  "insightsViewDetails": "查看明細"
 }

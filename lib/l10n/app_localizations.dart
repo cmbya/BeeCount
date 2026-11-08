@@ -63,6 +63,41 @@ import 'app_localizations_zh.dart';
 /// be consistent with the languages listed in the AppLocalizations.supportedLocales
 /// property.
 abstract class AppLocalizations {
+  /// Analytics dashboard.
+  String get insightsWeek;
+  /// Analytics dashboard.
+  String get insightsSummary;
+  /// Analytics dashboard.
+  String get insightsDailyExpense;
+  /// Analytics dashboard.
+  String get insightsRefundIncome;
+  /// Analytics dashboard.
+  String get insightsTransferSummary;
+  /// Analytics dashboard.
+  String get insightsTransferTotal;
+  /// Analytics dashboard.
+  String get insightsExpenseChart;
+  /// Analytics dashboard.
+  String get insightsIncomeChart;
+  /// Analytics dashboard.
+  String get insightsBalanceChart;
+  /// Analytics dashboard.
+  String get insightsExpenseCategories;
+  /// Analytics dashboard.
+  String get insightsIncomeCategories;
+  /// Analytics dashboard.
+  String get insightsRefundHint;
+  /// Analytics dashboard.
+  String get insightsAverageHint;
+  /// Analytics dashboard.
+  String get insightsAssetsHint;
+  /// Analytics dashboard.
+  String get insightsSelectedPeriod;
+  /// Analytics dashboard.
+  String get insightsBillSummary;
+  /// Analytics dashboard.
+  String get insightsViewDetails;
+
   /// Refund flow.
   String get refundAccount;
   /// Refund flow.

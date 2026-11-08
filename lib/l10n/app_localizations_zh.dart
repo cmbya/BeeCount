@@ -7,6 +7,41 @@ import 'app_localizations.dart';
 /// The translations for Chinese (`zh`).
 class AppLocalizationsZh extends AppLocalizations {
   @override
+  String get insightsWeek => "周";
+  @override
+  String get insightsSummary => "收支统计";
+  @override
+  String get insightsDailyExpense => "日均支出";
+  @override
+  String get insightsRefundIncome => "退款收入";
+  @override
+  String get insightsTransferSummary => "流转统计";
+  @override
+  String get insightsTransferTotal => "转账金额";
+  @override
+  String get insightsExpenseChart => "支出统计图";
+  @override
+  String get insightsIncomeChart => "收入统计图";
+  @override
+  String get insightsBalanceChart => "结余统计图";
+  @override
+  String get insightsExpenseCategories => "支出分类详情";
+  @override
+  String get insightsIncomeCategories => "收入分类详情";
+  @override
+  String get insightsRefundHint => "退款与退款收入展示同一笔实际退回金额，账户只入账一次。原支出和预算用量保留。";
+  @override
+  String get insightsAverageHint => "日均按本周期已过去的自然日计算，包含没有记账的日期。";
+  @override
+  String get insightsAssetsHint => "全部个人账户 · 主币种，非仅当前账本；缺汇率币种不计入，估值账户使用当前估值。";
+  @override
+  String get insightsSelectedPeriod => "所选时间段";
+  @override
+  String get insightsBillSummary => "账单汇总";
+  @override
+  String get insightsViewDetails => "查看明细";
+
+  @override
   String get refundAccount => "入账账户";
   @override
   String get refundAccountAndDate => "账户与日期";
@@ -8745,6 +8780,41 @@ class AppLocalizationsZh extends AppLocalizations {
 
 /// The translations for Chinese, as used in Taiwan (`zh_TW`).
 class AppLocalizationsZhTw extends AppLocalizationsZh {
+  @override
+  String get insightsWeek => "週";
+  @override
+  String get insightsSummary => "收支統計";
+  @override
+  String get insightsDailyExpense => "日均支出";
+  @override
+  String get insightsRefundIncome => "退款收入";
+  @override
+  String get insightsTransferSummary => "流轉統計";
+  @override
+  String get insightsTransferTotal => "轉帳金額";
+  @override
+  String get insightsExpenseChart => "支出統計圖";
+  @override
+  String get insightsIncomeChart => "收入統計圖";
+  @override
+  String get insightsBalanceChart => "結餘統計圖";
+  @override
+  String get insightsExpenseCategories => "支出分類詳情";
+  @override
+  String get insightsIncomeCategories => "收入分類詳情";
+  @override
+  String get insightsRefundHint => "退款與退款收入顯示同一筆實際退回金額，帳戶只入帳一次。原支出和預算用量保留。";
+  @override
+  String get insightsAverageHint => "日均按本週期已過去的日曆日計算，包含沒有記帳的日期。";
+  @override
+  String get insightsAssetsHint => "全部個人帳戶 · 主幣別，非僅目前帳本；缺匯率幣別不計入，估值帳戶使用目前估值。";
+  @override
+  String get insightsSelectedPeriod => "所選時間段";
+  @override
+  String get insightsBillSummary => "帳單彙總";
+  @override
+  String get insightsViewDetails => "查看明細";
+
   @override
   String get refundAccount => "入帳帳戶";
   @override

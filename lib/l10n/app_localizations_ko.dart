@@ -7,6 +7,41 @@ import 'app_localizations.dart';
 /// The translations for Korean (`ko`).
 class AppLocalizationsKo extends AppLocalizations {
   @override
+  String get insightsWeek => "주";
+  @override
+  String get insightsSummary => "수입 및 지출";
+  @override
+  String get insightsDailyExpense => "일평균 지출";
+  @override
+  String get insightsRefundIncome => "환불 입금";
+  @override
+  String get insightsTransferSummary => "이체 통계";
+  @override
+  String get insightsTransferTotal => "이체 금액";
+  @override
+  String get insightsExpenseChart => "지출 차트";
+  @override
+  String get insightsIncomeChart => "수입 차트";
+  @override
+  String get insightsBalanceChart => "잔액 차트";
+  @override
+  String get insightsExpenseCategories => "지출 카테고리";
+  @override
+  String get insightsIncomeCategories => "수입 카테고리";
+  @override
+  String get insightsRefundHint => "환불과 환불 입금은 같은 반환 금액이며 한 번만 입금됩니다. 원래 지출과 예산 사용량은 유지됩니다.";
+  @override
+  String get insightsAverageHint => "일평균은 거래가 없는 날을 포함한 경과 일수로 계산합니다.";
+  @override
+  String get insightsAssetsHint => "전체 개인 계좌 · 기준 통화. 현재 장부에 한정되지 않습니다. 환율 없는 통화는 제외하며 평가 계좌는 현재 값을 사용합니다.";
+  @override
+  String get insightsSelectedPeriod => "선택한 기간";
+  @override
+  String get insightsBillSummary => "기간 요약";
+  @override
+  String get insightsViewDetails => "상세 보기";
+
+  @override
   String get refundAccount => "입금 계좌";
   @override
   String get refundAccountAndDate => "계좌 및 날짜";

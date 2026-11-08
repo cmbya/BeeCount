@@ -3635,5 +3635,22 @@
   "refundRecord": "退款记录",
   "refundSaveFailed": "退款未保存，请检查权限、账户和金额后重试。",
   "refundStale": "原账单或剩余可退金额已变化，请重新打开退款页面。",
-  "refundTitle": "退款"
+  "refundTitle": "退款",
+  "insightsWeek": "周",
+  "insightsSummary": "收支统计",
+  "insightsDailyExpense": "日均支出",
+  "insightsRefundIncome": "退款收入",
+  "insightsTransferSummary": "流转统计",
+  "insightsTransferTotal": "转账金额",
+  "insightsExpenseChart": "支出统计图",
+  "insightsIncomeChart": "收入统计图",
+  "insightsBalanceChart": "结余统计图",
+  "insightsExpenseCategories": "支出分类详情",
+  "insightsIncomeCategories": "收入分类详情",
+  "insightsRefundHint": "退款与退款收入展示同一笔实际退回金额，账户只入账一次。原支出和预算用量保留。",
+  "insightsAverageHint": "日均按本周期已过去的自然日计算，包含没有记账的日期。",
+  "insightsAssetsHint": "全部个人账户 · 主币种，非仅当前账本；缺汇率币种不计入，估值账户使用当前估值。",
+  "insightsSelectedPeriod": "所选时间段",
+  "insightsBillSummary": "账单汇总",
+  "insightsViewDetails": "查看明细"
 }

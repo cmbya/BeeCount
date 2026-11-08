@@ -3928,5 +3928,22 @@
   "refundRecord": "Refund record",
   "refundSaveFailed": "Unable to save the refund. Check permissions, account and amount, then try again.",
   "refundStale": "The bill or remaining refundable amount changed. Reopen this page before saving.",
-  "refundTitle": "Refund"
+  "refundTitle": "Refund",
+  "insightsWeek": "Week",
+  "insightsSummary": "Income and expenses",
+  "insightsDailyExpense": "Daily expense",
+  "insightsRefundIncome": "Refund income",
+  "insightsTransferSummary": "Transfers",
+  "insightsTransferTotal": "Transfer amount",
+  "insightsExpenseChart": "Expense chart",
+  "insightsIncomeChart": "Income chart",
+  "insightsBalanceChart": "Balance chart",
+  "insightsExpenseCategories": "Expense categories",
+  "insightsIncomeCategories": "Income categories",
+  "insightsRefundHint": "Refund and refund income show the same returned money, credited once. Original expenses and budget usage are kept.",
+  "insightsAverageHint": "Daily average includes every elapsed calendar day, including days with no bills.",
+  "insightsAssetsHint": "All personal accounts · base currency; not limited to this ledger. Missing-rate currencies are excluded. Valuation accounts use their current value.",
+  "insightsSelectedPeriod": "Selected period",
+  "insightsBillSummary": "Period summary",
+  "insightsViewDetails": "View details"
 }

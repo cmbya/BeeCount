@@ -7,6 +7,41 @@ import 'app_localizations.dart';
 /// The translations for English (`en`).
 class AppLocalizationsEn extends AppLocalizations {
   @override
+  String get insightsWeek => "Week";
+  @override
+  String get insightsSummary => "Income and expenses";
+  @override
+  String get insightsDailyExpense => "Daily expense";
+  @override
+  String get insightsRefundIncome => "Refund income";
+  @override
+  String get insightsTransferSummary => "Transfers";
+  @override
+  String get insightsTransferTotal => "Transfer amount";
+  @override
+  String get insightsExpenseChart => "Expense chart";
+  @override
+  String get insightsIncomeChart => "Income chart";
+  @override
+  String get insightsBalanceChart => "Balance chart";
+  @override
+  String get insightsExpenseCategories => "Expense categories";
+  @override
+  String get insightsIncomeCategories => "Income categories";
+  @override
+  String get insightsRefundHint => "Refund and refund income show the same returned money, credited once. Original expenses and budget usage are kept.";
+  @override
+  String get insightsAverageHint => "Daily average includes every elapsed calendar day, including days with no bills.";
+  @override
+  String get insightsAssetsHint => "All personal accounts · base currency; not limited to this ledger. Missing-rate currencies are excluded. Valuation accounts use their current value.";
+  @override
+  String get insightsSelectedPeriod => "Selected period";
+  @override
+  String get insightsBillSummary => "Period summary";
+  @override
+  String get insightsViewDetails => "View details";
+
+  @override
   String get refundAccount => "Credit account";
   @override
   String get refundAccountAndDate => "Account and date";
