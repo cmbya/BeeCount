@@ -1,6 +1,11 @@
 name: Billing Widget Check
 on:
   workflow_dispatch:
+    inputs:
+      test_path:
+        description: 'Optional single test file for bounded diagnosis'
+        type: string
+        default: ''
 permissions:
   contents: read
 jobs:
@@ -17,10 +22,17 @@ jobs:
       - run: flutter pub get
       - name: Run relevant widgets
         shell: bash
+        env:
+          TEST_PATH: ${{ inputs.test_path }}
         run: |
           set -euo pipefail
           mkdir -p test-results
-          flutter test --no-pub --reporter expanded --concurrency 2 \
+          if [[ -n "$TEST_PATH" ]]; then
+            [[ "$TEST_PATH" =~ ^test/[a-zA-Z0-9_/]+_test.dart$ ]] && test -f "$TEST_PATH"
+            timeout 180s flutter test --no-pub --reporter expanded "$TEST_PATH" 2>&1 | tee test-results/widgets.log
+            exit 0
+          fi
+          timeout 300s flutter test --no-pub --reporter expanded --concurrency 2 \
             test/widgets/transaction_detail_page_test.dart \
             test/widgets/transaction_detail_images_test.dart \
             test/widgets/transaction_edit_scope_test.dart \

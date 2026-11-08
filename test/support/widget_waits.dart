@@ -9,6 +9,7 @@ Future<void> pumpUntilFound(WidgetTester tester, Finder finder) async {
     await tester.pump(const Duration(milliseconds: 50));
     if (finder.evaluate().isNotEmpty) return;
   }
+  debugDumpApp();
   expect(finder, findsWidgets, reason: 'Expected UI after bounded asynchronous settling');
 }
 

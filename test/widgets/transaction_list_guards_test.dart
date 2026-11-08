@@ -32,7 +32,7 @@ void main() {
       home: Scaffold(body: TransactionList(hideAmounts: false, transactions: rows)))));
     await tester.runAsync(() async => Future<void>.delayed(const Duration(milliseconds: 150)));
     await tester.pumpAndSettle();
-    await pumpUntilFound(tester, find.byType(Dismissible).first);
+    await pumpUntilFound(tester, find.byType(Dismissible));
   }
   Future<void> dispose(WidgetTester tester) async {
     await tester.pumpWidget(const SizedBox.shrink());
