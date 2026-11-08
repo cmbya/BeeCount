@@ -33,7 +33,7 @@ private struct DailySpendingSnapshot: Decodable {
             abs(localStart - dayStartMs) < 1000 &&
             ms >= dayStartMs && ms < dayEndMs &&
             ms >= periodStartMs && ms < periodEndMs &&
-            generatedAtMs >= dayStartMs && generatedAtMs < dayEndMs
+            generatedAtMs >= dayStartMs && generatedAtMs <= ms
     }
 
     static func preview(at date: Date) -> DailySpendingSnapshot? {
@@ -187,7 +187,7 @@ private struct DailySpendingEntryView: View {
                         amount(snapshot.map { money($0.monthExpense, snapshot: $0) } ?? "—", size: 16)
                         caption(copy.month)
                     }
-                }.buttonStyle(.plain)
+                }.buttonStyle(.plain).frame(maxWidth: .infinity, alignment: .leading)
                 Link(destination: budgetURL) {
                     VStack(alignment: .leading, spacing: 4) {
                         if let snapshot = snapshot {
@@ -201,7 +201,7 @@ private struct DailySpendingEntryView: View {
                         }
                         caption(copy.remaining)
                     }
-                }.buttonStyle(.plain)
+                }.buttonStyle(.plain).frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
