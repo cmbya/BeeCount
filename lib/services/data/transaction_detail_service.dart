@@ -2,6 +2,7 @@ import 'package:drift/drift.dart' as d;
 import 'package:intl/intl.dart';
 import '../../utils/account_type_utils.dart';
 import '../../data/db.dart';
+import '../../utils/ledger_permissions.dart';
 import '../../data/repositories/base_repository.dart';
 import '../../data/repositories/local/local_repository.dart';
 import '../../utils/shared_ledger_picker_filter.dart';
@@ -10,7 +11,7 @@ import '../currency/rate_math.dart';
 /// Single-field edits always merge into the latest row, preserving unrelated
 /// category/account overrides, transfer endpoints, flags and currency snapshots.
 class TransactionDetailService {
-  static bool canEdit(Ledger ledger) => !ledger.isShared || const {'owner', 'editor'}.contains(ledger.myRole);
+  static bool canEdit(Ledger ledger) => canWriteLedger(ledger);
 
   static Future<void> update(BaseRepository repo, int id, Map<String, dynamic> patch) async {
     Future<void> write() async {

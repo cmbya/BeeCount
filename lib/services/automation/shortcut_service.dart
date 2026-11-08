@@ -156,6 +156,7 @@ class ShortcutService {
     required List<Map<String, dynamic>> rules,
     required List<Category> allUsable,
     required List<String> warnings,
+    bool includeBuiltin = true,
   }) {
     if (type == 'transfer') return null;
     final usable = allUsable.where((c) => c.kind == type).toList();
@@ -178,8 +179,8 @@ class ShortcutService {
       }
       return rule['category_id'] as int;
     }
-    return CategoryMatcher.smartMatch(
-        merchant: merchant, fullText: ruleText + ' ' + note, categories: usable);
+    return includeBuiltin ? CategoryMatcher.smartMatch(
+        merchant: merchant, fullText: ruleText + ' ' + note, categories: usable) : null;
   }
 
   /// Read-only category resolution. It never recognizes, commits or refreshes AI.
@@ -193,6 +194,9 @@ class ShortcutService {
         throw const ShortcutFailure('INVALID_REQUEST', '分类线索格式无效或过长');
       }
     }
+    if (input.containsKey('personalOnly') && input['personalOnly'] is! bool) {
+      throw const ShortcutFailure('INVALID_REQUEST', '分类模式无效');
+    }
     final warnings = <String>[];
     int? categoryId;
     if (type != 'transfer') {
@@ -201,19 +205,23 @@ class ShortcutService {
         ...await repo.getUsableCategories('income')
       ];
       final explicit = input['categoryId'];
-      if (explicit != null) {
-        if (explicit is! int ||
-            !allUsable.any((c) => c.id == explicit && c.kind == type)) {
-          throw const ShortcutFailure('INVALID_REFERENCE', '指定分类已失效或与收支类型不符');
-        }
-        categoryId = explicit;
-      } else {
-        categoryId = _matchLocalCategory(
-            type: type, ledgerId: opts['ledgerId'] as int,
-            merchant: input['merchant'] as String? ?? '',
-            note: input['note'] as String? ?? '',
-            ruleText: input['ruleText'] as String? ?? '',
-            rules: await store.rules(), allUsable: allUsable, warnings: warnings);
+      if (explicit != null && (explicit is! int ||
+          !allUsable.any((c) => c.id == explicit && c.kind == type))) {
+        throw const ShortcutFailure('INVALID_REFERENCE', '指定分类已失效或与收支类型不符');
+      }
+      // INITIAL draft only. Manual review selections go to validate/commit;
+      // they must never be passed through automatic classification again.
+      final rules = await store.rules();
+      final personal = _matchLocalCategory(type: type, ledgerId: opts['ledgerId'] as int,
+        merchant: input['merchant'] as String? ?? '', note: input['note'] as String? ?? '',
+        ruleText: input['ruleText'] as String? ?? '', rules: rules,
+        allUsable: allUsable, warnings: warnings, includeBuiltin: false);
+      categoryId = personal ?? (explicit as int?);
+      if (categoryId == null && input['personalOnly'] != true) {
+        categoryId = _matchLocalCategory(type: type, ledgerId: opts['ledgerId'] as int,
+          merchant: input['merchant'] as String? ?? '', note: input['note'] as String? ?? '',
+          ruleText: input['ruleText'] as String? ?? '', rules: const [],
+          allUsable: allUsable, warnings: warnings);
       }
     }
     return {'status': 'ok', 'ledgerId': opts['ledgerId'], 'type': type,

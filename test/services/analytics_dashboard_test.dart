@@ -101,4 +101,54 @@ void main() {
     final group = data.expenseCategories.single;
     expect(data.detail(AnalyticsMetric.expense, categoryIds: group.categoryIds).single.t.id, id);
   });
+  test('parent identity survives edits into unused siblings and newly created children', () async {
+    final sibling = await repo.createCategory(name: '房租', kind: 'expense', level: 2, parentId: root);
+    final id = await tx('expense', 25, 2, category: child);
+    final first = await AnalyticsService(repo).load(query());
+    final filter = AnalyticsCategoryFilter.root(first.expenseCategories.single.category!.id);
+    await repo.updateTransaction(id: id, type: 'expense', amount: 25, categoryId: sibling);
+    var fresh = await AnalyticsService(repo).load(query());
+    expect(fresh.detail(AnalyticsMetric.expense, categoryFilter: filter).single.t.id, id);
+    expect(fresh.detail(AnalyticsMetric.expense, categoryFilter: AnalyticsCategoryFilter.leaf(child)), isEmpty);
+    final added = await repo.createCategory(name: '网络', kind: 'expense', level: 2, parentId: root);
+    await repo.updateTransaction(id: id, type: 'expense', amount: 25, categoryId: added);
+    fresh = await AnalyticsService(repo).load(query());
+    expect(fresh.detail(AnalyticsMetric.expense, categoryFilter: filter).single.t.id, id);
+    final other = await repo.createCategory(name: '购物', kind: 'expense');
+    await repo.updateTransaction(id: id, type: 'expense', amount: 25, categoryId: other);
+    fresh = await AnalyticsService(repo).load(query());
+    expect(fresh.detail(AnalyticsMetric.expense, categoryFilter: filter), isEmpty);
+  });
+
+  test('root identity includes direct legacy bills and keeps uncategorized separate', () async {
+    final direct = await tx('expense', 20, 2, category: root);
+    final nested = await tx('expense', 10, 3, category: child);
+    final none = await tx('expense', 5, 4);
+    final data = await AnalyticsService(repo).load(query());
+    expect(data.detail(AnalyticsMetric.expense, categoryFilter: AnalyticsCategoryFilter.root(root))
+      .map((r) => r.t.id).toSet(), {direct, nested});
+    expect(data.detail(AnalyticsMetric.expense, categoryFilter: const AnalyticsCategoryFilter.root(null)).single.t.id, none);
+    expect(data.detail(AnalyticsMetric.expense, categoryFilter: AnalyticsCategoryFilter.leaf(root)).single.t.id, direct);
+  });
+
+  test('shared negative root identity follows a newly mirrored sibling', () async {
+    final ledgerKey = (await repo.getLedgerById(ledger))!.syncId!;
+    Future<void> mirror(String key, String? parent) => db.into(db.sharedLedgerCategories).insert(
+      SharedLedgerCategoriesCompanion.insert(ledgerSyncId: ledgerKey, syncId: key, name: key,
+        kind: 'expense', level: d.Value(parent == null ? 1 : 2), parentSyncId: d.Value(parent),
+        updatedAt: DateTime(2026, 11, 1))).then((_) {});
+    await mirror('root-new', null); await mirror('leaf-old', 'root-new');
+    final id = await tx('expense', 12, 2);
+    await (db.update(db.transactions)..where((t) => t.id.equals(id))).write(
+      const TransactionsCompanion(categorySyncIdOverride: d.Value('leaf-old')));
+    final first = await AnalyticsService(repo).load(query());
+    final filter = AnalyticsCategoryFilter.root(first.expenseCategories.single.category!.id);
+    expect(filter.id, lessThan(0));
+    await mirror('leaf-new', 'root-new');
+    await (db.update(db.transactions)..where((t) => t.id.equals(id))).write(
+      const TransactionsCompanion(categorySyncIdOverride: d.Value('leaf-new')));
+    final fresh = await AnalyticsService(repo).load(query());
+    expect(fresh.detail(AnalyticsMetric.expense, categoryFilter: filter).single.t.id, id);
+  });
+
 }

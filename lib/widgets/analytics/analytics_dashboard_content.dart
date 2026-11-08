@@ -144,9 +144,9 @@ class AnalyticsCategorySection extends StatefulWidget {
 }
 class _AnalyticsCategorySectionState extends State<AnalyticsCategorySection> {
   final _expanded = <int?>{};
-  void _open(Set<int?> ids, String name) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => AnalyticsDetailPage(
+  void _open(AnalyticsCategoryFilter filter, String name) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => AnalyticsDetailPage(
     query: widget.data.query, metric: widget.type == 'expense' ? AnalyticsMetric.expense : AnalyticsMetric.income,
-    title: name, categoryIds: ids)));
+    title: name, categoryFilter: filter)));
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context), data = widget.data;
@@ -176,15 +176,15 @@ class _AnalyticsCategorySectionState extends State<AnalyticsCategorySection> {
             onTap: () {
               if (group.children.any((child) => child.id != group.category?.id)) {
                 setState(() { if (!_expanded.remove(group.category?.id)) _expanded.add(group.category?.id); });
-              } else { _open(group.categoryIds, group.category?.name ?? l10n.commonUncategorized); }
+              } else { _open(AnalyticsCategoryFilter.root(group.category?.id), group.category?.name ?? l10n.commonUncategorized); }
             }),
           if (_expanded.contains(group.category?.id)) ...[
-            Align(alignment: Alignment.centerRight, child: TextButton(onPressed: () => _open(group.categoryIds,
+            Align(alignment: Alignment.centerRight, child: TextButton(onPressed: () => _open(AnalyticsCategoryFilter.root(group.category?.id),
               group.category?.name ?? l10n.commonUncategorized), child: Text(l10n.insightsViewDetails))),
             for (final child in group.children) Padding(padding: const EdgeInsets.only(left: 20), child: ListTile(
               title: Text(child.category?.name ?? l10n.commonUncategorized),
               trailing: AmountText(value: child.total, currencyCode: data.ledger.currency, showCurrency: true),
-              onTap: () => _open({child.id}, child.category?.name ?? l10n.commonUncategorized))),
+              onTap: () => _open(AnalyticsCategoryFilter.leaf(child.id), child.category?.name ?? l10n.commonUncategorized))),
           ],
         ],
       ],

@@ -12,6 +12,8 @@ import 'package:uuid/uuid.dart';
 
 import '../../data/db.dart';
 import '../../models/refund_identity.dart';
+import '../../services/automation/shortcut_schema.dart' show parseShortcutAmount, shortcutCurrencyDigits;
+import '../../utils/account_type_utils.dart' show isTradableType;
 import '../../data/repositories/base_repository.dart';
 import '../../services/custom_icon_service.dart';
 import '../../services/system/logger_service.dart';
@@ -41,6 +43,7 @@ part 'sync_engine_profile.dart';
 part 'sync_engine_apply.dart';
 part 'sync_engine_serialization.dart';
 part 'sync_engine_pull.dart';
+part 'sync_engine_refunds.dart';
 
 const _uuid = Uuid();
 
@@ -1061,7 +1064,8 @@ class SyncEngine implements app.SyncService {
   /// 2. **失败隔离**:整页 apply 抛错 → rollback + 错误入 [pullErrors] 表 +
   ///    cursor 不推进 + 后续页不再拉,UI 显示"同步暂停"
   /// 3. **busy retry**:SQLite busy/locked 单条 retry 2 次
-  /// 4. **小颗粒度**:单页 limit 50(原 500),让 retry 范围 + UI 反馈更可控
+  /// 4. **退款关联**:分页临时冲突允许向前合并,最多 10000 条;仍冲突则
+  ///    保留本地状态与已提交 cursor,使用既有同步暂停提示,不静默删账。
   ///
   /// 传 [sinceOverride]=0 = 从头重放(等价旧 replayAllChanges)。
   ///
@@ -1159,6 +1163,9 @@ class SyncEngine implements app.SyncService {
     int pageIndex = 0;
     final loopStart = DateTime.now();
     BeeCountCloudPullResult? reuseResult = firstPage;
+    var pending = <BeeCountCloudSyncChange>[];
+    // Bound replay memory. A refund conflict never advances appCursor.
+    const maxRefundBatch = 10000;
     while (hasMore) {
       pageIndex++;
       final pageStart = DateTime.now();
@@ -1179,13 +1186,30 @@ class SyncEngine implements app.SyncService {
         logger.info('SyncEngine',
             'pull #$pageIndex: since=$nextSince got ${result.changes.length} hasMore=${result.hasMore} (HTTP ${httpMs}ms)');
       }
-      if (result.changes.isEmpty) break;
+      if (result.changes.isEmpty) {
+        if (pending.isNotEmpty) {
+          await pullErrors.record(change: pending.last,
+            error: const _RefundSyncConflict('incomplete_group'), stackTrace: StackTrace.current);
+        }
+        break;
+      }
 
       final applyStart = DateTime.now();
-      final outcome = await _applyPullPage(result.changes);
+      final batch = [...pending, ...result.changes];
+      final outcome = await _applyPullPage(batch,
+        deferRefundConflict: result.hasMore && batch.length < maxRefundBatch);
       final applyMs = DateTime.now().difference(applyStart).inMilliseconds;
       logger.info('SyncEngine',
           'pull #$pageIndex: applied ${outcome.applied}/${result.changes.length} (apply ${applyMs}ms, page total ${DateTime.now().difference(pageStart).inMilliseconds}ms)');
+      if (outcome.refundDeferred) {
+        // Fetch ahead without committing any part of this refund group. Replay
+        // the combined batch so groups crossing page boundaries stay atomic.
+        pending = batch;
+        nextSince = result.serverCursor;
+        hasMore = result.hasMore;
+        continue;
+      }
+      pending = [];
       totalApplied += outcome.applied;
       if (outcome.blocked) {
         logger.warning(
@@ -1199,7 +1223,7 @@ class SyncEngine implements app.SyncService {
 
       // 同 change_id 之前如果有未 resolved 错误(server 修了脏数据 + 推新
       // change → apply 通过)→ markResolved 让 UI 不再显示
-      for (final ch in result.changes) {
+      for (final ch in batch) {
         await pullErrors.markResolved(ch.changeId);
       }
 
@@ -1223,41 +1247,51 @@ class SyncEngine implements app.SyncService {
   /// - 不可恢复异常 → rollback + 错误入 [pullErrors] + return blocked
   /// - SQLite busy/locked → 单条 retry 2 次
   Future<_PullPageOutcome> _applyPullPage(
-      List<BeeCountCloudSyncChange> changes) async {
-    int applied = 0;
-    int skipped = 0;
-    BeeCountCloudSyncChange? failingChange;
-
+      List<BeeCountCloudSyncChange> changes, {bool deferRefundConflict = false}) async {
+    int applied = 0, skipped = 0;
+    BeeCountCloudSyncChange? failingChange = changes.isEmpty ? null : changes.first;
+    final priorJobs = pendingCustomIconJobs.toSet();
+    final appliedChanges = <BeeCountCloudSyncChange>[];
     try {
       await db.transaction(() async {
+        final before = await _refundSnapshot();
         for (final ch in changes) {
           failingChange = ch;
           final ok = await _applyOneWithBusyRetry(ch);
           if (ok) {
             applied++;
+            appliedChanges.add(ch);
           } else {
             skipped++;
           }
         }
+        if (appliedChanges.isNotEmpty) {
+          failingChange = appliedChanges.lastWhere((ch) => ch.entityType == 'transaction' ||
+            ch.entityType == 'account' || ch.entityType == 'ledger', orElse: () => appliedChanges.last);
+          await _validateRefundSync(before, appliedChanges);
+        }
       });
-      if (skipped > 0) {
-        logger.info('SyncEngine', 'pull: 应用 $applied / 跳过 $skipped (本页)');
-      }
-      return _PullPageOutcome(applied: applied, blocked: false);
     } catch (e, st) {
-      // 整页 rollback 已自动完成(Drift transaction 抛错回滚)
-      logger.error(
-          'SyncEngine',
-          '本页 apply 抛错 change_id=${failingChange?.changeId} '
-              'type=${failingChange?.entityType}',
-          e,
-          st);
-      final ch = failingChange;
-      if (ch != null) {
-        await pullErrors.record(change: ch, error: e, stackTrace: st);
+      // Rollback must also discard cached IDs/jobs and queued disk deletions.
+      pendingCustomIconJobs.removeWhere((job) => !priorJobs.contains(job));
+      if (activePullCache != null) {
+        // Rebuild, don't prime the mutated instance (prime doesn't remove IDs).
+        activePullCache = null;
+        final restored = LookupCache();
+        await restored.prime(db);
+        activePullCache = restored;
       }
+      if (e is _RefundSyncConflict && deferRefundConflict) {
+        return const _PullPageOutcome(applied: 0, blocked: false, refundDeferred: true);
+      }
+      logger.error('SyncEngine',
+        'pull batch rolled back change_id=${failingChange?.changeId}', e, st);
+      final ch = failingChange;
+      if (ch != null) await pullErrors.record(change: ch, error: e, stackTrace: st);
       return const _PullPageOutcome(applied: 0, blocked: true);
     }
+    if (skipped > 0) logger.info('SyncEngine', 'pull: applied $applied / skipped $skipped');
+    return _PullPageOutcome(applied: applied, blocked: false);
   }
 
   /// 单条 apply 带 SQLite busy/locked retry。其它异常直接抛,让外层整页 rollback。
@@ -1268,7 +1302,7 @@ class SyncEngine implements app.SyncService {
     var attempts = 0;
     while (true) {
       try {
-        return await applyRemoteChange(ch);
+        return await _dispatchRemoteChange(ch);
       } catch (e) {
         final msg = e.toString().toLowerCase();
         final transient =
@@ -1480,7 +1514,9 @@ class SyncHealthReport {
 
 /// pull 单页处理结果。详见 [SyncEngine._applyPullPage]。
 class _PullPageOutcome {
-  const _PullPageOutcome({required this.applied, required this.blocked});
+  const _PullPageOutcome({required this.applied, required this.blocked, this.refundDeferred = false});
+
+  final bool refundDeferred;
 
   /// 本页成功 apply 的条数。整页 rollback 时为 0。
   final int applied;

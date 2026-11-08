@@ -9,6 +9,12 @@ extension SyncEngineApplyExt on SyncEngine {
   /// 应用单条远程变更到本地数据库
   /// 返回 true 表示已应用，false 表示跳过
   Future<bool> applyRemoteChange(BeeCountCloudSyncChange change) async {
+    final outcome = await _applyPullPage([change]);
+    if (outcome.blocked) throw StateError('sync_apply_blocked');
+    return outcome.applied > 0;
+  }
+
+  Future<bool> _dispatchRemoteChange(BeeCountCloudSyncChange change) async {
     // 跳过本设备自己的变更
     final deviceId = await _getDeviceId();
     if (change.updatedByDeviceId == deviceId) return false;
@@ -1114,17 +1120,10 @@ extension SyncEngineApplyExt on SyncEngine {
       });
     }
 
-    // 磁盘清理跑在事务外(IO 失败不影响 DB 状态)
-    for (final fn in attachmentsToDeleteFromDisk) {
-      try {
-        final file = await _getAttachmentFile(fn);
-        if (file != null && file.existsSync()) {
-          await file.delete();
-        }
-      } catch (e, st) {
-        logger.warning('SyncEngine', '删除本地孤立附件文件失败: $fn', st);
-      }
-    }
+    // Reuse the DB's outermost-commit hook: rollback keeps files and thumbnails,
+    // commit rechecks references before unlinking files shared by other bills.
+    await db.afterSuccessfulTransaction(() =>
+      _cleanupUnreferencedAttachmentFiles(attachmentsToDeleteFromDisk));
   }
 }
 

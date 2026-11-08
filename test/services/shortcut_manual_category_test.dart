@@ -60,16 +60,33 @@ void main() {
     if (categoryId != null) 'categoryId': categoryId,
   });
 
-  test('explicit category wins and personal rule beats built-in keywords', () async {
+  test('personal rule overrides an incoming category during initialization', () async {
     await rule('personal');
     expect((await classify(note: '瑞幸咖啡'))['categoryId'], personal);
-    expect((await classify(note: '瑞幸咖啡', categoryId: dining))['categoryId'], dining);
+    expect((await classify(note: '瑞幸咖啡', categoryId: dining))['categoryId'], personal);
+    final other = await repo.createCategory(name: '其它', kind: 'expense');
+    await rule('meifu', keyword: '美福');
+    expect((await classify(note: '美福便利店付款', categoryId: other))['categoryId'], personal);
+    expect((await classify(note: 'no_rule_evidence', categoryId: other))['categoryId'], other);
+    expect((await classify(note: '瑞幸咖啡', categoryId: other))['categoryId'], personal);
     final invalid = await classify(note: '瑞幸', categoryId: income);
     expect(invalid['code'], 'INVALID_REFERENCE');
   });
 
+  test('ambiguous supplied category requests only personal rules, not built-in guessing', () async {
+    final unmatched = await service.handle({'operation': 'classify', 'ledgerId': ledger,
+      'type': 'expense', 'note': '瑞幸咖啡', 'personalOnly': true});
+    expect(unmatched['categoryId'], isNull);
+    await rule('personal');
+    final matched = await service.handle({'operation': 'classify', 'ledgerId': ledger,
+      'type': 'expense', 'note': '瑞幸咖啡', 'personalOnly': true});
+    expect(matched['categoryId'], personal);
+  });
+
   test('without a rule built-in keywords use only available same-type categories', () async {
     expect((await classify(note: '瑞幸咖啡'))['categoryId'], dining);
+    expect((await classify(note: '瑞幸咖啡', categoryId: personal))['categoryId'], personal,
+      reason: 'Built-in keywords must not override a supplied category without a personal rule');
     expect((await classify(type: 'income', note: '工资到账'))['categoryId'], income);
     expect((await classify(type: 'income', note: '瑞幸'))['categoryId'], isNull);
     expect((await classify(note: 'zqx_no_matching_evidence'))['categoryId'], isNull);
@@ -161,7 +178,7 @@ void main() {
     }
   });
 
-  test('multi-keyword rules preserve scope, type, priority and explicit overrides', () async {
+  test('multi-keyword rules preserve scope, type, priority and override incoming categories', () async {
     const keywords = '线索甲|线索乙';
     await rule('wrong-ledger', keyword: keywords, mode: 'contains_any', target: dining, forLedger: otherLedger, priority: 1000);
     await rule('disabled', keyword: keywords, mode: 'contains_any', target: dining, enabled: 0, priority: 900);
@@ -169,7 +186,7 @@ void main() {
     await rule('winner', keyword: keywords, mode: 'contains_any', priority: 100);
     await rule('lower', keyword: keywords, mode: 'contains_any', target: dining, priority: 1);
     expect((await classify(note: '线索乙'))['categoryId'], personal);
-    expect((await classify(note: '线索乙', categoryId: dining))['categoryId'], dining);
+    expect((await classify(note: '线索乙', categoryId: dining))['categoryId'], personal);
     expect((await classify(type: 'income', note: '线索乙'))['categoryId'], income);
     expect((await classify(type: 'transfer', note: '线索乙'))['categoryId'], isNull);
   });

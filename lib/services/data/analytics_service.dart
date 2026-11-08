@@ -24,6 +24,7 @@ class AnalyticsService {
         ...await repo.getSharedSyntheticCategoriesForLedger(ledger.id),
       };
       return AnalyticsDashboard(ledger: ledger, query: query, period: period,
+        categories: Map.unmodifiable(categories),
         rows: List.unmodifiable(rows), buckets: _buckets(period, query.startDay, rows),
         expenseCategories: _groups(rows, 'expense', categories),
         incomeCategories: _groups(rows, 'income', categories));

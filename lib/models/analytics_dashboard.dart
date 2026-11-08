@@ -78,15 +78,25 @@ class AnalyticsCategoryGroup {
     required this.count, required this.children, required this.categoryIds});
 }
 
+/// A parent route keeps its identity, never a snapshot of used descendants.
+class AnalyticsCategoryFilter {
+  final int? id;
+  final bool includeDescendants;
+  const AnalyticsCategoryFilter.root(this.id) : includeDescendants = true;
+  const AnalyticsCategoryFilter.leaf(this.id) : includeDescendants = false;
+}
+
 class AnalyticsDashboard {
   final Ledger ledger;
   final AnalyticsQuery query;
   final AnalyticsPeriod period;
   final List<AnalyticsRow> rows;
+  final Map<int, Category> categories;
   final List<AnalyticsBucket> buckets;
   final List<AnalyticsCategoryGroup> expenseCategories, incomeCategories;
   const AnalyticsDashboard({required this.ledger, required this.query, required this.period,
-    required this.rows, required this.buckets, required this.expenseCategories, required this.incomeCategories});
+    required this.rows, required this.buckets, required this.expenseCategories, required this.incomeCategories,
+    this.categories = const {}});
 
   static double value(Transaction tx) => tx.nativeAmount ?? tx.amount;
   static bool ordinary(Transaction tx, String type) => tx.type == type &&
@@ -102,11 +112,28 @@ class AnalyticsDashboard {
       case AnalyticsMetric.transfer: return tx.type == 'transfer';
     }
   }
-  List<AnalyticsRow> detail(AnalyticsMetric metric, {DateTime? start, DateTime? end, Set<int?>? categoryIds}) =>
+  bool _categoryMatches(Category? category, AnalyticsCategoryFilter filter) {
+    if (filter.id == null) return category == null;
+    if (category == null) return false;
+    if (!filter.includeDescendants) return category.id == filter.id;
+    Category? current = categories[category.id] ?? category;
+    final seen = <int>{};
+    while (current != null && seen.add(current.id)) {
+      if (current.id == filter.id) return true;
+      final parent = categories[current.parentId];
+      if (parent == null || parent.kind != category.kind) break;
+      current = parent;
+    }
+    return false;
+  }
+
+  List<AnalyticsRow> detail(AnalyticsMetric metric, {DateTime? start, DateTime? end,
+      Set<int?>? categoryIds, AnalyticsCategoryFilter? categoryFilter}) =>
       rows.where((row) => matches(row.t, metric) &&
           (start == null || !row.t.happenedAt.isBefore(start)) &&
           (end == null || row.t.happenedAt.isBefore(end)) &&
-          (categoryIds == null || categoryIds.contains(row.category?.id))).toList();
+          (categoryIds == null || categoryIds.contains(row.category?.id)) &&
+          (categoryFilter == null || _categoryMatches(row.category, categoryFilter))).toList();
   double total(AnalyticsMetric metric) {
     if (metric == AnalyticsMetric.balance) return total(AnalyticsMetric.income) - total(AnalyticsMetric.expense);
     if (metric == AnalyticsMetric.dailyExpense) return period.days > 0 ? total(AnalyticsMetric.expense) / period.days : 0;

@@ -1,5 +1,8 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../models/refund_identity.dart';
+import '../../utils/ledger_permissions.dart';
+import '../../models/analytics_dashboard.dart' show AnalyticsDashboard;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_list_view/flutter_list_view.dart';
@@ -89,8 +92,11 @@ class TransactionListState extends ConsumerState<TransactionList> {
   /// 获取统一格式的交易列表（用于内部处理）
   /// 始终使用 transactions 作为列表数据源，预加载数据只用于详情（标签、附件、账户）
   List<({Transaction t, Category? category, Account? account, Account? toAccount})> get _transactionsList {
-    return widget.transactions ?? [];
+    return (widget.transactions ?? [])
+        .where((row) => !_deletedTransactionIds.contains(row.t.id)).toList();
   }
+
+  final _deletedTransactionIds = <int>{};
 
   bool _showingTransactionActions = false;
 
@@ -163,6 +169,7 @@ class TransactionListState extends ConsumerState<TransactionList> {
   @override
   void didUpdateWidget(covariant TransactionList oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _deletedTransactionIds.retainAll((widget.transactions ?? []).map((row) => row.t.id));
 
     // 检测预加载数据是否变化（如账本切换），重置状态
     if (widget.transactionsWithDetails != oldWidget.transactionsWithDetails) {
@@ -428,13 +435,11 @@ class TransactionListState extends ConsumerState<TransactionList> {
             final list = item.$3 as List<({Transaction t, Category? category, Account? account, Account? toAccount})>;
             double dayIncome = 0, dayExpense = 0;
             for (final it in list) {
-              // A refund credit is shown in the list but is not ordinary income.
-              if (RefundIdentity.isRefund(it.t.syncId)) continue;
-              // 转账不计入收支统计
-              if (it.t.type == 'income') {
+              // Same exclusion/refund policy as the monthly summary.
+              if (AnalyticsDashboard.ordinary(it.t, 'income')) {
                 dayIncome += it.t.nativeAmount ?? it.t.amount;
               }
-              if (it.t.type == 'expense') {
+              if (AnalyticsDashboard.ordinary(it.t, 'expense')) {
                 dayExpense += it.t.nativeAmount ?? it.t.amount;
               }
             }
@@ -499,7 +504,7 @@ class TransactionListState extends ConsumerState<TransactionList> {
             }
 
             return Dismissible(
-              key: Key('tx-${it.t.id}-$index'), // 添加索引避免key冲突
+              key: ValueKey('tx-${it.t.id}'),
               direction: DismissDirection.endToStart,
               background: Container(
                 alignment: Alignment.centerRight,
@@ -507,34 +512,42 @@ class TransactionListState extends ConsumerState<TransactionList> {
                 color: Colors.red,
                 child: const Icon(Icons.delete, color: Colors.white),
               ),
+              // Commit before removing the row; failed permission checks leave
+              // it in the list even if the role changed during confirmation.
               confirmDismiss: (direction) async {
                 final repo = ref.read(repositoryProvider);
-                if (repo is LocalRepository && await repo.hasTransactionRefunds(it.t.id)) {
-                  if (context.mounted) showToast(context, AppLocalizations.of(context).refundLockHint);
+                final container = ProviderScope.containerOf(context, listen: false);
+                try {
+                  final latest = await repo.getTransactionById(it.t.id);
+                  if (latest == null ||
+                      !canWriteLedger(await repo.getLedgerById(latest.ledgerId))) return false;
+                  if (repo is LocalRepository && await repo.hasTransactionRefunds(latest.id)) {
+                    if (context.mounted) showToast(context, AppLocalizations.of(context).refundLockHint);
+                    return false;
+                  }
+                  if (!context.mounted) return false;
+                  final confirmed = await AppDialog.confirm<bool>(context,
+                    title: AppLocalizations.of(context).deleteConfirmTitle,
+                    message: AppLocalizations.of(context).deleteConfirmMessage);
+                  if (confirmed != true) return false;
+                  await repo.deleteTransaction(latest.id);
+                  if (context.mounted) {
+                    showToast(context, AppLocalizations.of(context).ledgersDeleted);
+                  }
+                  unawaited(PostProcessor.afterCommit(() async {
+                    container.invalidate(countsForLedgerProvider(latest.ledgerId));
+                    container.read(statsRefreshProvider.notifier).state++;
+                    container.read(budgetRefreshProvider.notifier).state++;
+                    await PostProcessor.syncC(container, ledgerId: latest.ledgerId);
+                  }));
+                  return true; // Only a committed deletion may animate away.
+                } catch (_) {
+                  if (context.mounted) showToast(context, AppLocalizations.of(context).commonFailed);
                   return false;
                 }
-                if (!context.mounted) return false;
-                return await AppDialog.confirm<bool>(
-                      context,
-                      title: AppLocalizations.of(context).deleteConfirmTitle,
-                      message: AppLocalizations.of(context).deleteConfirmMessage,
-                    ) ??
-                    false;
               },
-              onDismissed: (direction) async {
-                final repo = ref.read(repositoryProvider);
-                await repo.deleteTransaction(it.t.id);
-
-                if (!context.mounted) return;
-                final curLedger = ref.read(currentLedgerIdProvider);
-                ref.invalidate(countsForLedgerProvider(curLedger));
-                ref.read(statsRefreshProvider.notifier).state++;
-                ref.read(budgetRefreshProvider.notifier).state++;
-                PostProcessor.sync(ref, ledgerId: curLedger);
-
-                if (context.mounted) {
-                  showToast(context, AppLocalizations.of(context).ledgersDeleted);
-                }
+              onDismissed: (_) {
+                if (mounted) setState(() => _deletedTransactionIds.add(it.t.id));
               },
               child: Column(
                 children: [

@@ -294,55 +294,47 @@ extension SyncEngineAttachmentsExt on SyncEngine {
     }
   }
 
-  /// 清理给定交易的本地磁盘附件(原图 + 缩略图)。在 transaction_attachments
-  /// 行被 db.delete **之前** 调 —— 之后 fileName 就查不到了。
-  ///
-  /// 跟 `LocalTransactionRepository._deleteAttachmentsForTransaction` 几乎一样,
-  /// 但那个是 private;这里是 sync pull 路径独立使用(不想走完整 repo 接口,
-  /// 因为 repo 的 deleteTransaction 会 record changeTracker,会造成 pull →
-  /// record → push 的回环)。失败只 warn 不抛,不 block 事件 apply。
+  /// Capture names before deleting links. Unlink only after a valid commit.
   Future<void> _cleanupTxAttachmentFilesOnDisk(int transactionId) async {
-    try {
-      final attachments = await (db.select(db.transactionAttachments)
-            ..where((a) => a.transactionId.equals(transactionId)))
-          .get();
-      if (attachments.isEmpty) return;
+    final attachments = await (db.select(db.transactionAttachments)
+      ..where((a) => a.transactionId.equals(transactionId))).get();
+    final names = attachments.map((a) => a.fileName).toSet();
+    await db.afterSuccessfulTransaction(() => _cleanupUnreferencedAttachmentFiles(names));
+  }
 
-      final appDir = await getApplicationDocumentsDirectory();
-      final attachmentDir = Directory('${appDir.path}/attachments');
-      final cacheDir = await getTemporaryDirectory();
-      final thumbDir = Directory('${cacheDir.path}/attachment_thumbs');
-
-      for (final att in attachments) {
-        // 多笔共享同一物理文件:此处 DB 行尚未删(apply 在本函数之后才删行)，
-        // 故排除本交易,看是否还有其他交易的行引用同 fileName,有就保留文件。
-        final others = await (db.select(db.transactionAttachments)
-              ..where((a) => a.fileName.equals(att.fileName))
-              ..where((a) => a.transactionId.equals(transactionId).not()))
-            .get();
-        if (others.isNotEmpty) continue;
-
-        final file = File('${attachmentDir.path}/${att.fileName}');
-        if (await file.exists()) {
-          try {
-            await file.delete();
-          } catch (e) {
-            logger.warning('SyncEngine',
-                'pull delete: unlink attachment failed ${att.fileName}: $e');
-          }
-        }
-        final thumbName =
-            '${p.basenameWithoutExtension(att.fileName)}_thumb.jpg';
-        final thumbFile = File('${thumbDir.path}/$thumbName');
-        if (await thumbFile.exists()) {
-          try {
-            await thumbFile.delete();
-          } catch (_) {/* best effort */}
-        }
+  Future<void> _cleanupUnreferencedAttachmentFiles(Iterable<String> names) async {
+    for (final name in names) {
+      try {
+        final references = await (db.select(db.transactionAttachments)
+          ..where((a) => a.fileName.equals(name))..limit(1)).get();
+        if (references.isNotEmpty) continue;
+        final file = await _getAttachmentFile(name);
+        if (file != null && await file.exists()) await file.delete();
+        final cacheDir = await getTemporaryDirectory();
+        final thumb = File(p.join(cacheDir.path, 'attachment_thumbs',
+          '${p.basenameWithoutExtension(name)}_thumb.jpg'));
+        if (await thumb.exists()) await thumb.delete();
+      } catch (_) {
+        logger.warning('SyncEngine', 'pull: attachment cleanup incomplete');
       }
-    } catch (e, st) {
-      logger.warning(
-          'SyncEngine', 'pull delete: 清理附件磁盘文件异常 tx=$transactionId: $e\n$st');
+    }
+  }
+
+  Future<void> _cleanupUnreferencedIconFiles(Iterable<String> paths) async {
+    if (paths.isEmpty) return;
+    try {
+      final categories = await db.select(db.categories).get();
+      final used = {for (final c in categories)
+        if (c.customIconPath != null) p.basename(c.customIconPath!)};
+      final appDir = await getApplicationDocumentsDirectory();
+      for (final rel in paths) {
+        final name = p.basename(rel);
+        if (used.contains(name)) continue;
+        final file = File(p.join(appDir.path, 'custom_icons', name));
+        if (await file.exists()) await file.delete();
+      }
+    } catch (_) {
+      logger.warning('SyncEngine', 'pull: custom icon cleanup incomplete');
     }
   }
 
@@ -369,20 +361,7 @@ extension SyncEngineAttachmentsExt on SyncEngine {
       }
       if (paths.isEmpty) return;
 
-      final appDir = await getApplicationDocumentsDirectory();
-      final iconDir = Directory('${appDir.path}/custom_icons');
-      for (final rel in paths) {
-        final fileName = p.basename(rel);
-        final file = File('${iconDir.path}/$fileName');
-        if (await file.exists()) {
-          try {
-            await file.delete();
-          } catch (e) {
-            logger.warning(
-                'SyncEngine', 'pull delete: unlink custom icon failed $fileName: $e');
-          }
-        }
-      }
+      await db.afterSuccessfulTransaction(() => _cleanupUnreferencedIconFiles(paths));
     } catch (e, st) {
       logger.warning('SyncEngine', 'pull delete: 清理分类图标磁盘文件异常: $e\n$st');
     }

@@ -1490,10 +1490,20 @@ enum VariableBillingFlow {
                 let matches = categoryMatches(categoryName, options: categories)
                 if matches.count == 1 { payload["categoryId"] = matches[0]["id"] }
                 else { payload["pendingCategory"] = categoryName }
-            } else if resolvedType != nil && (!trimmed(note).isEmpty || !trimmed(originalText).isEmpty) {
-                let matched = try await call(["operation": "classify", "type": effectiveType, "ledgerId": ledger,
-                    "note": note ?? "", "ruleText": originalText ?? "", "merchant": ""])
-                if let id = matched["categoryId"] as? Int, categories.contains(where: { $0["id"] as? Int == id }) { payload["categoryId"] = id }
+            }
+            if resolvedType != nil && (!trimmed(note).isEmpty || !trimmed(originalText).isEmpty) {
+                // Personal rules win over incoming shortcut categories only at
+                // initialization. Later manual edits never call classify again.
+                var classification: [String: Any] = ["operation": "classify", "type": effectiveType,
+                    "ledgerId": ledger, "note": note ?? "", "ruleText": originalText ?? "", "merchant": ""]
+                if let id = payload["categoryId"] as? Int { classification["categoryId"] = id }
+                // Unresolved/ambiguous supplied names stay pending unless a personal rule wins.
+                if payload["pendingCategory"] != nil { classification["personalOnly"] = true }
+                let matched = try await call(classification)
+                if let id = matched["categoryId"] as? Int, categories.contains(where: { $0["id"] as? Int == id }) {
+                    payload["categoryId"] = id
+                    payload.removeValue(forKey: "pendingCategory")
+                }
             }
         }
         let tagName = trimmed(tag)

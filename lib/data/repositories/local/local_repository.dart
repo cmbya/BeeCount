@@ -4,6 +4,7 @@ import 'package:drift/drift.dart' as d;
 import 'package:uuid/uuid.dart';
 
 import '../../../models/refund_identity.dart';
+import '../../../utils/ledger_permissions.dart';
 
 import '../../db.dart';
 import '../../../cloud/sync/change_tracker.dart';
@@ -572,6 +573,9 @@ class LocalRepository extends BaseRepository {
 
   @override
   Future<void> deleteTransaction(int id) => db.transaction(() async {
+    final current = await getTransactionById(id);
+    if (current == null) return;
+    if (!canWriteLedger(await getLedgerById(current.ledgerId))) throw StateError('read_only');
     if (await hasTransactionRefunds(id)) throw StateError('refund_original_locked');
     if (changeTracker != null) {
       final tx = await _transactionRepo.getTransactionById(id);
@@ -1337,6 +1341,10 @@ class LocalRepository extends BaseRepository {
     bool recordChanges = true,
   }) => db.transaction(() async {
     if (syncIds.isEmpty) return 0;
+    final targets = await (db.select(db.transactions)..where((t) => t.syncId.isIn(syncIds))).get();
+    for (final ledgerId in targets.map((tx) => tx.ledgerId).toSet()) {
+      if (!canWriteLedger(await getLedgerById(ledgerId))) throw StateError('read_only');
+    }
     final selected = syncIds.toSet();
     final links = await _refundLinks();
     if (links.any((link) => selected.contains(link.original) && !selected.contains(link.refund))) {

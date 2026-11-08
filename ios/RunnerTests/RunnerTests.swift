@@ -1346,7 +1346,7 @@ class RunnerTests: XCTestCase {
           return self.variableOptions()
         })
     let object = try ConfirmedBilling.decode(bill.payload)
-    XCTAssertEqual(operations, ["options"])
+    XCTAssertEqual(operations, ["options", "classify"])
     XCTAssertEqual(object["amountMinor"] as? Int, 1230)
     XCTAssertEqual(object["categoryId"] as? Int, 11, "Bare child name must save its own ID, not its parent")
     XCTAssertEqual(object["tagIds"] as? [Int], [3])
@@ -1361,15 +1361,19 @@ class RunnerTests: XCTestCase {
   }
   @available(iOS 16.0, *)
   @MainActor
-  func testVariableAmbiguousNamesStayPendingAndNeverApplyRulesOverExplicitName() async throws {
+  func testVariableAmbiguousNamesStayPendingWithoutLocalRuleMatch() async throws {
     var options = variableOptions()
     var categories = options["categories"] as! [[String: Any]]
     categories.append(["id": 31, "name": "购物/食品", "leafName": "食品", "parentId": 30, "parentName": "购物"])
     options["categories"] = categories
     for name in ["食品", "不存在分类"] {
       let bill = try await VariableBillingFlow.prepare(amount: "1", type: "支出", ledgerId: 1, category: name, tag: "不存在标签",
-          accountId: 1, sourceAccountId: nil, destinationAccountId: nil, date: nil, note: "规则命中也不能覆盖指定分类",
+          accountId: 1, sourceAccountId: nil, destinationAccountId: nil, date: nil, note: "无个人规则命中",
           excluded: "不是合法的是或否", originalText: "", screenshot: nil, call: { request in
+            if request["operation"] as? String == "classify" {
+              XCTAssertEqual(request["personalOnly"] as? Bool, true)
+              return [:]
+            }
             XCTAssertEqual(request["operation"] as? String, "options")
             return options
           })
@@ -1384,7 +1388,7 @@ class RunnerTests: XCTestCase {
   }
   @available(iOS 16.0, *)
   @MainActor
-  func testVariableEmptyCategoryUsesLocalRulesOnlyAndExplicitCategoryNeverDoes() async throws {
+  func testVariableEmptyCategoryUsesLocalRulesOnly() async throws {
     var operations: [String] = []
     let bill = try await VariableBillingFlow.prepare(amount: "1", type: "收入", ledgerId: 1, category: nil, tag: nil,
         accountId: 1, sourceAccountId: nil, destinationAccountId: nil, date: nil, note: "实际工资说明", excluded: "否",
@@ -1400,6 +1404,45 @@ class RunnerTests: XCTestCase {
         })
     XCTAssertEqual(operations, ["options", "classify"])
     XCTAssertEqual(try ConfirmedBilling.decode(bill.payload)["categoryId"] as? Int, 20)
+  }
+  @available(iOS 16.0, *)
+  @MainActor
+  func testVariablePersonalRuleOverridesIncomingCategoryButManualEditStays() async throws {
+    for category in [nil, "其它", "食品"] as [String?] {
+      var options = variableOptions()
+      var categories = options["categories"] as! [[String: Any]]
+      categories.append(["id": 40, "name": "便利店", "leafName": "便利店"])
+      categories.append(["id": 41, "name": "其它", "leafName": "其它"])
+      options["categories"] = categories
+      let draft = try await VariableBillingFlow.prepare(amount: "10", type: "支出", ledgerId: 1,
+          category: category, tag: nil, accountId: 1, sourceAccountId: nil, destinationAccountId: nil,
+          date: Date(), note: "美福门店", excluded: "否", originalText: "", screenshot: nil, call: { request in
+            let operation = request["operation"] as? String
+            XCTAssertNotEqual(operation, "recognize")
+            if operation == "classify" {
+              XCTAssertEqual(request["note"] as? String, "美福门店")
+              XCTAssertNil(request["image"])
+              let supplied: Int? = category == "食品" ? 11 : category == "其它" ? 41 : nil
+              XCTAssertEqual(request["categoryId"] as? Int, supplied)
+              return ["categoryId": 40]
+            }
+            return options
+          })
+      let payload = try ConfirmedBilling.decode(draft.payload)
+      XCTAssertEqual(payload["categoryId"] as? Int, 40)
+      XCTAssertNil(payload["pendingCategory"])
+      var actions = ["分类", "1. 餐饮", "2. 餐饮/饮料", "确认提交"]
+      let confirmed = try await VariableBillingFlow.confirm(draft, choose: { values, _ in
+        self.menuValue(actions.removeFirst(), values)
+      }, readAmount: { _, _ in XCTFail(); return "" }, readNote: { _ in XCTFail(); return "" },
+      readDate: { _ in XCTFail(); return Date() }, call: { request in
+        XCTAssertNotEqual(request["operation"] as? String, "classify", "Never overwrite a manual review choice")
+        return request["operation"] as? String == "validate" ? ["status": "valid"] : options
+      })
+      let submission = try XCTUnwrap(ConfirmedBilling.decode(confirmed.payload)["submission"] as? [String: Any])
+      let entries = try XCTUnwrap(submission["entries"] as? [[String: Any]])
+      XCTAssertEqual(entries.first?["categoryId"] as? Int, 12)
+    }
   }
   @available(iOS 16.0, *)
   @MainActor
