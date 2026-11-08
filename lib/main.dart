@@ -219,7 +219,7 @@ class _WidgetUpdateObserver extends ProviderObserver {
 ///
 /// 问题场景：
 /// - 应用被系统杀死后，通知任务会丢失
-/// - 应用更新后，通知任务需要重新设置
+/// - 应用更新后，通知任务会被清除
 /// - 手机重启后，通知任务需要重新设置
 ///
 /// 解决方案：
@@ -232,7 +232,9 @@ Future<void> _restoreUserReminder() async {
     final isEnabled = prefs.getBool('reminder_enabled') ?? false;
 
     if (isEnabled) {
-      print('✅ 发现用户已启用记账提醒: ${prefs.getString('reminder_time')}');
+      final hour = prefs.getInt('reminder_hour') ?? 21;
+      final minute = prefs.getInt('reminder_minute') ?? 0;
+      print('✅ 发现用户已启用记账提醒: ${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}');
       print('🔔 正在重新设置提醒任务...');
 
       try {
@@ -249,8 +251,8 @@ Future<void> _restoreUserReminder() async {
           id: 1001,
           title: l10n.reminderTitle,
           body: l10n.reminderDailyBody,
-          hour: prefs.getInt('reminder_hour') ?? 21,
-          minute: prefs.getInt('reminder_minute') ?? 0,
+          hour: hour,
+          minute: minute,
         );
         print('✅ 记账提醒已成功恢复');
       } catch (e) {
@@ -269,11 +271,11 @@ Future<void> _restoreUserReminder() async {
 ///
 /// 问题场景：
 /// - 应用重启后，截图监听服务会丢失
-/// - 手机重启后，截图监听服务需要重新启动
+/// - 需要自动恢复用户之前的设置
 ///
 /// 解决方案：
 /// - 在应用启动时检查用户是否开启了截图监听
-/// - 如果开启了，重新启动截图监听服务
+/// - 如果开启了，重新启动监听服务
 Future<void> _restoreScreenshotMonitor(ProviderContainer container) async {
   if (!Platform.isAndroid) return;
 
@@ -333,9 +335,9 @@ void _setupImageShareHandler(ProviderContainer container) {
     // 初始化服务（会自动设置MethodChannel监听器）
     ImageShareHandlerService(container);
 
-    logger.info('App', '✅ 图片分享处理服务已初始化');
+    logger.info('App', '✅ [Android] 图片分享处理服务已启动');
   } catch (e) {
-    logger.error('App', '❌ 图片分享处理服务初始化失败', e);
+    logger.error('App', '❌ [Android] 图片分享处理服务初始化失败', e);
     // 不抛出异常，避免影响应用启动
   }
 }
@@ -470,7 +472,7 @@ class MainApp extends ConsumerWidget {
       return const WelcomePage();
     }
 
-    // 如果是启屏状态，启动初始化
+    // 欢迎页面完成后，根据初始化状态显示对应页面
     if (initState != AppInitState.ready) {
       return const SplashPage();
     }
@@ -534,7 +536,9 @@ class MainApp extends ConsumerWidget {
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
           backgroundColor: primary,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          foregroundColor: Colors.white,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),
       ),
       floatingActionButtonTheme: base.floatingActionButtonTheme.copyWith(
