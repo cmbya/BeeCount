@@ -23,5 +23,6 @@ struct BeeCountWidgetBundle: WidgetBundle {
         BeeCountDashboardWidget()
         BeeCountConsumptionRhythmWidget()
         BeeCountBeeTrailWidget()
+        BeeCountDailySpendingWidget()
     }
 }
