@@ -20,6 +20,17 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
+      - name: Inspect custom sliver test traversal
+        run: |
+          python3 - <<'PY'
+          import glob
+          for path in glob.glob('/home/runner/.pub-cache/hosted/pub.dev/flutter_list_view-*/lib/**/*.dart', recursive=True):
+              lines = open(path).read().splitlines()
+              for i, line in enumerate(lines):
+                  if 'debugVisitOnstageChildren' in line:
+                      print(path)
+                      print('\n'.join(lines[max(0,i-2):i+18]))
+          PY
       - name: Run relevant widgets
         shell: bash
         env:

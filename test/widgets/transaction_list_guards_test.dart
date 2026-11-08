@@ -32,7 +32,7 @@ void main() {
       home: Scaffold(body: TransactionList(hideAmounts: false, transactions: rows)))));
     await tester.runAsync(() async => Future<void>.delayed(const Duration(milliseconds: 150)));
     await tester.pumpAndSettle();
-    await pumpUntilFound(tester, find.byType(Dismissible));
+    await pumpUntilFound(tester, find.byType(Dismissible, skipOffstage: false));
   }
   Future<void> dispose(WidgetTester tester) async {
     await tester.pumpWidget(const SizedBox.shrink());
@@ -50,7 +50,7 @@ void main() {
   });
   testWidgets('viewer swipe neither confirms nor deletes the row', (tester) async {
     await setRole('viewer'); await show(tester);
-    final row = find.byKey(ValueKey('tx-$id'));
+    final row = find.byKey(ValueKey('tx-$id'), skipOffstage: false);
     await tester.drag(row, const Offset(-600, 0));
     await tester.runAsync(() async => Future<void>.delayed(const Duration(milliseconds: 150)));
     await tester.pumpAndSettle();
@@ -61,7 +61,7 @@ void main() {
   });
   testWidgets('role downgrade while confirmation is open keeps the row', (tester) async {
     await setRole('editor'); await show(tester);
-    final row = find.byKey(ValueKey('tx-$id'));
+    final row = find.byKey(ValueKey('tx-$id'), skipOffstage: false);
     await tester.drag(row, const Offset(-600, 0));
     await tester.runAsync(() async => Future<void>.delayed(const Duration(milliseconds: 150)));
     await tester.pumpAndSettle();
@@ -78,7 +78,7 @@ void main() {
     await setRole('editor'); await show(tester);
     await tester.runAsync(() => db.customStatement(
       "CREATE TRIGGER fail_delete BEFORE DELETE ON transactions BEGIN SELECT RAISE(ABORT, 'failed'); END"));
-    final row = find.byKey(ValueKey('tx-$id'));
+    final row = find.byKey(ValueKey('tx-$id'), skipOffstage: false);
     await tester.drag(row, const Offset(-600, 0));
     await tester.runAsync(() async => Future<void>.delayed(const Duration(milliseconds: 150)));
     await tester.pumpAndSettle(); await tester.tap(find.text('确定'));
@@ -91,7 +91,7 @@ void main() {
   });
   testWidgets('successful deletion removes stale parent rows without a Dismissible error', (tester) async {
     await setRole('editor'); await show(tester);
-    final row = find.byKey(ValueKey('tx-$id'));
+    final row = find.byKey(ValueKey('tx-$id'), skipOffstage: false);
     await tester.drag(row, const Offset(-600, 0));
     await tester.runAsync(() async => Future<void>.delayed(const Duration(milliseconds: 150)));
     await tester.pumpAndSettle(); await tester.tap(find.text('确定'));

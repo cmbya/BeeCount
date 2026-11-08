@@ -78,8 +78,8 @@ void main() {
     final page = tester.widget<AnalyticsDetailPage>(find.byType(AnalyticsDetailPage));
     expect(page.categoryIds, isNull);
     expect(page.categoryFilter!.id, root); expect(page.categoryFilter!.includeDescendants, true);
-    await pumpUntilFound(tester, find.byKey(ValueKey('tx-$id')));
-    expect(find.byKey(ValueKey('tx-$id')), findsOneWidget);
+    await pumpUntilFound(tester, find.byKey(ValueKey('tx-$id'), skipOffstage: false));
+    expect(find.byKey(ValueKey('tx-$id'), skipOffstage: false), findsOneWidget);
     await tester.runAsync(() async {
       final added = await repo.createCategory(name: '网络', kind: 'expense', level: 2, parentId: root);
       await (db.update(db.transactions)..where((t) => t.id.equals(id))).write(
@@ -88,8 +88,8 @@ void main() {
     container.read(statsRefreshProvider.notifier).state++;
     await tester.runAsync(() async => Future<void>.delayed(const Duration(milliseconds: 150)));
     await tester.pumpAndSettle();
-    await pumpUntilFound(tester, find.byKey(ValueKey('tx-$id')));
-    expect(find.byKey(ValueKey('tx-$id')), findsOneWidget);
+    await pumpUntilFound(tester, find.byKey(ValueKey('tx-$id'), skipOffstage: false));
+    expect(find.byKey(ValueKey('tx-$id'), skipOffstage: false), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink()); await tester.pump(const Duration(seconds: 3));
   });
 

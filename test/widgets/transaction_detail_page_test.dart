@@ -32,8 +32,8 @@ void main() {
       supportedLocales: AppLocalizations.supportedLocales,
       home: Scaffold(body: TransactionList(hideAmounts: false, transactions: [(t: tx, category: category, account: null, toAccount: null)])))));
     await tester.pumpAndSettle();
-    await pumpUntilFound(tester, find.byType(TransactionListItem));
-    await tester.tap(find.byType(TransactionListItem));
+    await pumpUntilFound(tester, find.byType(TransactionListItem, skipOffstage: false));
+    await tester.tap(find.byType(TransactionListItem, skipOffstage: false));
     await tester.runAsync(() async { await Future<void>.delayed(const Duration(milliseconds: 150)); });
     await tester.pumpAndSettle();
     expect(find.byType(TransactionDetailPage), findsOneWidget);
