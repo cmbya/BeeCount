@@ -155,7 +155,7 @@ enum DailySpendingSharedStore {
         // An explicit unavailable-ledger envelope invalidates previous values.
         let snapshot = try? JSONDecoder().decode(DailySpendingSnapshot.self, from: bytes)
         let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any]
-        guard snapshot?.valid == true || object?["status"] as? String == "noLedger" else {
+        guard snapshot?.valid == true || (object?["status"] as? String) == "noLedger" else {
             throw DailySpendingStorageError.invalidSnapshot
         }
         let directory = item.url.appendingPathComponent(folder, isDirectory: true)

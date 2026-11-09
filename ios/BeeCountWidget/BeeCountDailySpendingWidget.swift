@@ -4,7 +4,7 @@ import WidgetKit
 import UIKit
 
 extension DailySpendingSnapshot {
-static func preview(at date: Date) -> DailySpendingSnapshot? {
+    static func preview(at date: Date) -> DailySpendingSnapshot? {
         let calendar = Calendar.current
         let start = calendar.startOfDay(for: date)
         guard let end = calendar.date(byAdding: .day, value: 1, to: start),
@@ -33,9 +33,8 @@ static func preview(at date: Date) -> DailySpendingSnapshot? {
 private struct DailySpendingCopy {
     // This personal widget is explicitly Chinese, even with no shared snapshot
     // and even when the extension process resolves Locale.current to English.
-    let locale: Locale
     var title: String { "每日花销" }
-    var description: String { "今日、本月支出与剩余预算，附近七天趋势" }
+    var description: String { "今日、本月支出与剩余预算，附近 7 天趋势" }
     var today: String { "今日已花" }
     var month: String { "本月已花" }
     var remaining: String { "还能花" }
@@ -94,7 +93,7 @@ private struct DailySpendingEntryView: View {
     private let budgetURL = URL(string: "beecount://open?page=budget")!
     private let statisticsURL = URL(string: "beecount://open?page=statistics")!
     private var copy: DailySpendingCopy {
-        DailySpendingCopy(locale: entry.snapshot.map { Locale(identifier: $0.locale) } ?? .current)
+        DailySpendingCopy()
     }
     private var current: DailySpendingSnapshot? {
         guard let snapshot = entry.snapshot, snapshot.isCurrent(at: entry.date) else { return nil }
@@ -211,7 +210,7 @@ struct BeeCountDailySpendingWidget: Widget {
     let kind = "BeeCountDailySpendingWidget"
 
     var body: some WidgetConfiguration {
-        let copy = DailySpendingCopy(locale: .current)
+        let copy = DailySpendingCopy()
         return StaticConfiguration(kind: kind, provider: DailySpendingProvider()) { entry in
             if #available(iOS 17.0, *) {
                 DailySpendingEntryView(entry: entry)
