@@ -132,8 +132,8 @@ class _SummaryPagerState extends ConsumerState<_SummaryPager> {
         SizedBox(height: 196 + (scale - 1) * 80,
           child: PageView.builder(key: const Key('home-summary-pager'),
             controller: _controller,
-            // Finger moving right: expense -> income -> budget, as requested.
-            reverse: true, allowImplicitScrolling: true,
+            // Swipe left: expense -> income -> budget; keep the card order.
+            reverse: false, allowImplicitScrolling: true,
             itemCount: titles.length,
             onPageChanged: (value) => setState(() => _page = value),
             itemBuilder: (_, index) => slide(index))),

@@ -10,7 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
-  testWidgets('right swipe changes expense to income to budget without moving list', (tester) async {
+  testWidgets('left swipe changes expense to income to budget without moving list', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final key = (ledgerId: 1, month: DateTime(2026, 11));
     final c = ProviderContainer(overrides: [
@@ -30,16 +30,24 @@ void main() {
     ));
     await tester.pumpAndSettle();
     final pager = find.byKey(const Key('home-summary-pager'));
+    expect(tester.widget<PageView>(pager).reverse, isFalse);
     final listPosition = tester.getTopLeft(find.text('transaction-list-marker'));
     expect(find.byKey(const ValueKey('home-summary-amount-0')).hitTestable(), findsOneWidget);
-    await tester.drag(pager, const Offset(400, 0));
+    await tester.drag(pager, const Offset(-400, 0));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('home-summary-amount-1')).hitTestable(), findsOneWidget);
-    await tester.drag(pager, const Offset(400, 0));
+    await tester.drag(pager, const Offset(-400, 0));
     await tester.pumpAndSettle();
     expect(find.text('剩余月预算').hitTestable(), findsOneWidget);
     expect(find.byKey(const ValueKey('home-summary-amount-2')).hitTestable(), findsOneWidget);
     expect(tester.getTopLeft(find.text('transaction-list-marker')), listPosition);
+    // Swiping right goes back without changing the logical card order.
+    await tester.drag(pager, const Offset(400, 0));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('home-summary-amount-1')).hitTestable(), findsOneWidget);
+    await tester.drag(pager, const Offset(-400, 0));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('home-summary-amount-2')).hitTestable(), findsOneWidget);
     c.read(hideAmountsProvider.notifier).state = true;
     await tester.pumpAndSettle();
     expect(find.text('****').hitTestable(), findsWidgets);
