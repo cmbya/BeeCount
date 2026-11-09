@@ -95,6 +95,7 @@ enum DailySpendingSharedStore {
     static func candidates() throws -> [Candidate] {
         let bundle = Bundle.main
         var ids = Set(groups(in: bundle))
+        var pairedDefaultAllowed = true
         // Inspect the paired target's profile as well, when present. Do not
         // choose a group that only the host profile authorizes.
         let peer: Bundle?
@@ -109,10 +110,13 @@ enum DailySpendingSharedStore {
         }
         if let peer = peer {
             let peerGroups = Set(groups(in: peer))
-            if !peerGroups.isEmpty { ids = ids.isEmpty ? peerGroups : ids.intersection(peerGroups) }
+            if !peerGroups.isEmpty {
+                pairedDefaultAllowed = peerGroups.contains(defaultGroup)
+                ids = ids.isEmpty ? peerGroups : ids.intersection(peerGroups)
+            }
         }
         // Original development installs may not embed a provisioning profile.
-        ids.insert(defaultGroup)
+        if pairedDefaultAllowed { ids.insert(defaultGroup) }
         return try ids.sorted().compactMap { id -> Candidate? in
             guard let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: id) else { return nil }
             let directory = url.appendingPathComponent(folder, isDirectory: true)
