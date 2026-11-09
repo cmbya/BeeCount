@@ -16,7 +16,7 @@ on:
         description: "CFBundleVersion (greater than the last published build)"
         required: true
         type: string
-        default: "25"
+        default: "28"
 
 permissions:
   contents: read
