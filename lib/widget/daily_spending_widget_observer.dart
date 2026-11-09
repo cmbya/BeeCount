@@ -148,6 +148,7 @@ class DailySpendingWidgetObserver extends ProviderObserver
       } catch (_) {
         _lastError = '组件刷新服务不可用，请重新打开 App';
       } finally {
+        if (!_pending) _debounce?.cancel();
         _inFlight = null;
         completer.complete();
       }

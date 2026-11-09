@@ -44,7 +44,7 @@ struct DailySpendingSnapshot: Codable {
 }
 
 enum DailySpendingStorageError: String, Error {
-    case noAccess, chooseGroup, conflictingGroups, missingSnapshot, invalidSnapshot, writeFailed
+    case noAccess, chooseGroup, conflictingGroups, missingSnapshot, noLedger, invalidSnapshot, writeFailed
 
     var message: String {
         switch self {
@@ -52,6 +52,7 @@ enum DailySpendingStorageError: String, Error {
         case .chooseGroup: return "请到 App 的桌面组件设置中选择共享组"
         case .conflictingGroups: return "共享组选择冲突，请到 App 检查；未改动账本"
         case .missingSnapshot: return "尚未生成数据，请打开 App 并刷新桌面组件"
+        case .noLedger: return "当前账本不可用，请在 App 选择账本后刷新"
         case .invalidSnapshot: return "组件数据无效，请到 App 重新刷新"
         case .writeFailed: return "共享数据写入校验失败，请检查签名权限"
         }
@@ -170,8 +171,10 @@ enum DailySpendingSharedStore {
         let item = try select(candidates())
         let url = item.url.appendingPathComponent(folder).appendingPathComponent(snapshotName)
         guard FileManager.default.fileExists(atPath: url.path) else { throw DailySpendingStorageError.missingSnapshot }
-        guard let bytes = try? Data(contentsOf: url),
-              let snapshot = try? JSONDecoder().decode(DailySpendingSnapshot.self, from: bytes), snapshot.valid else {
+        guard let bytes = try? Data(contentsOf: url) else { throw DailySpendingStorageError.invalidSnapshot }
+        if let object = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+           object["status"] as? String == "noLedger" { throw DailySpendingStorageError.noLedger }
+        guard let snapshot = try? JSONDecoder().decode(DailySpendingSnapshot.self, from: bytes), snapshot.valid else {
             throw DailySpendingStorageError.invalidSnapshot
         }
         return snapshot
