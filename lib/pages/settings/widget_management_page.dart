@@ -26,6 +26,7 @@ import '../../widget/widget_data_service.dart'
         QuickAddCategoryItem,
         RecentTransactionItem;
 import '../../widget/widget_spec.dart' show HWSize;
+import '../../widget/daily_spending_widget_diagnostics.dart';
 import '../../widgets/biz/section_card.dart';
 import '../../widgets/ui/ui.dart';
 
@@ -70,6 +71,7 @@ class WidgetManagementPage extends ConsumerWidget {
               ),
               children: [
                 _buildGalleryHeader(context, ref, l10n),
+                if (Platform.isIOS) const DailySpendingWidgetDiagnostics(),
                 SizedBox(height: 10.0.scaled(context, ref)),
 
                 // 1. 收支速览

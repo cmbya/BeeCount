@@ -95,9 +95,11 @@ Future<void> main() async {
   // ProviderScope(parent: ...) 子作用域上,didUpdateProvider 从未被回调,
   // _WidgetUpdateObserver 一直是死代码(2026-07 review 发现)——启动预热/
   // 切账本触发的小组件渲染全靠它,必须真正生效。
+  final dailySpendingObserver = DailySpendingWidgetObserver();
   final container = ProviderContainer(
-    observers: [const _WidgetUpdateObserver(), DailySpendingWidgetObserver()],
+    observers: [const _WidgetUpdateObserver(), dailySpendingObserver],
   );
+  dailySpendingObserver.attach(container);
 
   // 初始化应用模式（需要在生成重复交易之前，确保模式正确）
   // 直接从 SharedPreferences 读取并设置到 appModeProvider

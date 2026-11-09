@@ -1,9 +1,11 @@
 import Flutter
 import UIKit
 import UserNotifications
+import WidgetKit
 
 @main
 @objc class AppDelegate: FlutterAppDelegate {
+  private var dailySpendingChannel: FlutterMethodChannel?
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -31,6 +33,7 @@ import UserNotifications
       binaryMessenger: controller.binaryMessenger
     )
     LoggerPlugin.setup(channel: loggerChannel)
+    setupDailySpendingWidget(messenger: controller.binaryMessenger)
 
     // 监听 iCloud 日志（从插件模块发送）
     NotificationCenter.default.addObserver(
@@ -91,4 +94,38 @@ import UserNotifications
     clearNotificationBadge()
     completionHandler()
   }
+
+  private func setupDailySpendingWidget(messenger: FlutterBinaryMessenger) {
+    let channel = FlutterMethodChannel(name: "com.beecount.daily_spending_widget", binaryMessenger: messenger)
+    dailySpendingChannel = channel
+    channel.setMethodCallHandler { call, result in
+      do {
+        switch call.method {
+        case "diagnostics":
+          result(DailySpendingSharedStore.diagnostics())
+        case "chooseGroup":
+          guard let args = call.arguments as? [String: Any], let group = args["group"] as? String else {
+            result(FlutterError(code: "invalidArgument", message: "请选择有效共享组", details: nil)); return
+          }
+          try DailySpendingSharedStore.choose(group)
+          result(nil)
+        case "publish":
+          guard let args = call.arguments as? [String: Any], let raw = args["payload"] as? String,
+                raw.utf8.count < 65536 else {
+            result(FlutterError(code: "invalidArgument", message: "组件快照无效", details: nil)); return
+          }
+          let group = try DailySpendingSharedStore.write(raw)
+          WidgetCenter.shared.reloadTimelines(ofKind: DailySpendingSharedStore.kind)
+          result(["verified": true, "group": group])
+        default:
+          result(FlutterMethodNotImplemented)
+        }
+      } catch let error as DailySpendingStorageError {
+        result(FlutterError(code: error.rawValue, message: error.message, details: nil))
+      } catch {
+        result(FlutterError(code: "storageFailed", message: "共享数据操作失败，未改动账本", details: nil))
+      }
+    }
+  }
+
 }

@@ -27,7 +27,7 @@ struct DailySpendingSnapshot: Codable {
     var valid: Bool {
         schemaVersion == 1 && days.count == 7 &&
         Set(days.map(\.date)).count == 7 &&
-        days.allSatisfy { (1...7).contains($0.weekday) && $0.total.isFinite } &&
+        days.allSatisfy({ (1...7).contains($0.weekday) && $0.total.isFinite }) &&
         [generatedAtMs, dayStartMs, dayEndMs, periodStartMs, periodEndMs,
          todayExpense, monthExpense].allSatisfy(\.isFinite) &&
         budgetRemaining?.isFinite != false && dayEndMs > dayStartMs &&

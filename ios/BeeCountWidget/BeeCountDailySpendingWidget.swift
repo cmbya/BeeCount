@@ -3,40 +3,8 @@ import SwiftUI
 import WidgetKit
 import UIKit
 
-private struct DailySpendingDay: Decodable {
-    let date: String
-    let weekday: Int
-    let total: Double
-}
-
-private struct DailySpendingSnapshot: Decodable {
-    let schemaVersion: Int
-    let ledgerId: Int
-    let currency: String
-    let currencySymbol: String
-    let locale: String
-    let generatedAtMs: Double
-    let dayStartMs: Double
-    let dayEndMs: Double
-    let periodStartMs: Double
-    let periodEndMs: Double
-    let todayExpense: Double
-    let monthExpense: Double
-    let budgetRemaining: Double?
-    let days: [DailySpendingDay]
-
-    func isCurrent(at date: Date) -> Bool {
-        let ms = date.timeIntervalSince1970 * 1000
-        // Also invalidate after a timezone change that changes the local day.
-        let localStart = Calendar.current.startOfDay(for: date).timeIntervalSince1970 * 1000
-        return schemaVersion == 1 && days.count == 7 &&
-            abs(localStart - dayStartMs) < 1000 &&
-            ms >= dayStartMs && ms < dayEndMs &&
-            ms >= periodStartMs && ms < periodEndMs &&
-            generatedAtMs >= dayStartMs && generatedAtMs <= ms
-    }
-
-    static func preview(at date: Date) -> DailySpendingSnapshot? {
+extension DailySpendingSnapshot {
+static func preview(at date: Date) -> DailySpendingSnapshot? {
         let calendar = Calendar.current
         let start = calendar.startOfDay(for: date)
         guard let end = calendar.date(byAdding: .day, value: 1, to: start),
@@ -63,55 +31,36 @@ private struct DailySpendingSnapshot: Decodable {
 }
 
 private struct DailySpendingCopy {
+    // This personal widget is explicitly Chinese, even with no shared snapshot
+    // and even when the extension process resolves Locale.current to English.
     let locale: Locale
-    private var language: String { locale.languageCode ?? "en" }
-    private var traditional: Bool {
-        locale.scriptCode == "Hant" || ["TW", "HK", "MO"].contains(locale.regionCode ?? "")
-    }
-    private func text(_ simplified: String, _ traditional: String, _ english: String, _ korean: String) -> String {
-        switch language {
-        case "zh": return self.traditional ? traditional : simplified
-        case "ko": return korean
-        default: return english
-        }
-    }
-    var title: String { text("每日花销", "每日花銷", "Daily Spending", "매일 지출") }
-    var description: String {
-        text("今日、本月支出与剩余预算，附近七天趋势", "今日、本月支出與剩餘預算，附近七天趨勢",
-             "Today's spending, this month's spending, remaining budget and a seven-day trend", "오늘과 이번 달 지출, 남은 예산 및 최근 7일 추이")
-    }
-    var today: String { text("今日已花", "今日已花", "Spent today", "오늘 지출") }
-    var month: String { text("本月已花", "本月已花", "This month", "이번 달 지출") }
-    var remaining: String { text("还能花", "還能花", "Budget left", "남은 예산") }
-    var week: String { text("近 7 天", "近 7 天", "Last 7 days", "최근 7일") }
-    var noBudget: String { text("未设预算", "未設預算", "Not set", "미설정") }
-    var refresh: String { text("打开 App 更新", "開啟 App 更新", "Open app to update", "앱을 열어 업데이트") }
-    var weekdays: [String] {
-        switch language {
-        case "zh": return ["一", "二", "三", "四", "五", "六", "日"]
-        case "ko": return ["월", "화", "수", "목", "금", "토", "일"]
-        default: return ["M", "T", "W", "T", "F", "S", "S"]
-        }
-    }
+    var title: String { "每日花销" }
+    var description: String { "今日、本月支出与剩余预算，附近七天趋势" }
+    var today: String { "今日已花" }
+    var month: String { "本月已花" }
+    var remaining: String { "还能花" }
+    var week: String { "近 7 天" }
+    var noBudget: String { "未设预算" }
+    var refresh: String { "数据已过期，请打开 App 刷新" }
+    var weekdays: [String] { ["一", "二", "三", "四", "五", "六", "日"] }
 }
 
 private struct DailySpendingEntry: TimelineEntry {
     let date: Date
     let snapshot: DailySpendingSnapshot?
+    var message: String? = nil
 }
 
 private struct DailySpendingProvider: TimelineProvider {
-    private func readSnapshot() -> DailySpendingSnapshot? {
-        guard let raw = UserDefaults(suiteName: "group.com.tntlikely.beecount")?
-            .string(forKey: "widget_daily_spending_v1"),
-              let data = raw.data(using: .utf8),
-              let snapshot = try? JSONDecoder().decode(DailySpendingSnapshot.self, from: data),
-              snapshot.schemaVersion == 1,
-              snapshot.days.count == 7,
-              snapshot.days.allSatisfy({ (1...7).contains($0.weekday) && $0.total.isFinite }),
-              snapshot.todayExpense.isFinite, snapshot.monthExpense.isFinite,
-              snapshot.budgetRemaining?.isFinite != false else { return nil }
-        return snapshot
+    private func runtimeEntry(at date: Date) -> DailySpendingEntry {
+        do {
+            let snapshot = try DailySpendingSharedStore.read()
+            return DailySpendingEntry(date: date, snapshot: snapshot)
+        } catch let error as DailySpendingStorageError {
+            return DailySpendingEntry(date: date, snapshot: nil, message: error.message)
+        } catch {
+            return DailySpendingEntry(date: date, snapshot: nil, message: "共享数据读取失败，请到 App 检查")
+        }
     }
 
     func placeholder(in context: Context) -> DailySpendingEntry {
@@ -121,18 +70,19 @@ private struct DailySpendingProvider: TimelineProvider {
 
     func getSnapshot(in context: Context, completion: @escaping (DailySpendingEntry) -> Void) {
         let now = Date()
-        completion(DailySpendingEntry(date: now, snapshot: context.isPreview ? .preview(at: now) : readSnapshot()))
+        completion(context.isPreview ? DailySpendingEntry(date: now, snapshot: .preview(at: now)) : runtimeEntry(at: now))
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<DailySpendingEntry>) -> Void) {
         let now = Date()
-        let snapshot = readSnapshot()
-        var entries = [DailySpendingEntry(date: now, snapshot: snapshot)]
+        let entry = runtimeEntry(at: now)
+        let snapshot = entry.snapshot
+        var entries = [entry]
         let calendar = Calendar.current
         let midnight = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now)) ?? now.addingTimeInterval(86400)
         // Pre-schedule a stale state at midnight. A timeline reload only reads
         // the shared snapshot; it cannot wake Flutter to recompute the amounts.
-        entries.append(DailySpendingEntry(date: midnight, snapshot: snapshot))
+        entries.append(DailySpendingEntry(date: midnight, snapshot: snapshot, message: entry.message))
         let next = min(midnight, now.addingTimeInterval(30 * 60))
         completion(Timeline(entries: entries, policy: .after(next)))
     }
@@ -153,7 +103,7 @@ private struct DailySpendingEntryView: View {
 
     private func money(_ value: Double, snapshot: DailySpendingSnapshot) -> String {
         let formatter = NumberFormatter()
-        formatter.locale = Locale(identifier: snapshot.locale)
+        formatter.locale = Locale(identifier: "zh_CN")
         formatter.numberStyle = .currency
         formatter.currencyCode = snapshot.currency
         formatter.currencySymbol = snapshot.currencySymbol
@@ -244,7 +194,7 @@ private struct DailySpendingEntryView: View {
                         caption(copy.week)
                         Spacer(minLength: 0)
                         Image(systemName: "arrow.clockwise").font(.system(size: 22)).foregroundColor(.secondary)
-                        Text(copy.refresh).font(.system(size: 11)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Text(entry.message ?? copy.refresh).font(.system(size: 11)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 0)
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
